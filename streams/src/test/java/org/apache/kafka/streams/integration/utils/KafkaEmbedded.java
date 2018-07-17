@@ -175,32 +175,20 @@ public class KafkaEmbedded {
                             final Properties topicConfig) {
         log.debug("Creating topic { name: {}, partitions: {}, replication: {}, config: {} }",
                  topic, partitions, replication, topicConfig);
-        NewTopic newTopic = new NewTopic(topic, partitions, (short) replication);
+        final NewTopic newTopic = new NewTopic(topic, partitions, (short) replication);
         newTopic.configs((Map) topicConfig);
 
-        int tries = 0;
-        int maxTries = 5;
-        try (AdminClient adminClient = createAdminClient()) {
-            while (true) {
-                try {
-                    adminClient.createTopics(Collections.singletonList(newTopic)).all().get();
-                    break;
-                } catch (InterruptedException | ExecutionException e) {
-                    if (tries++ > maxTries)
-                        throw new RuntimeException(e);
-
-                    try {
-                        Thread.sleep(100);
-                    } catch (InterruptedException e1) { }
-                }
-            }
+        try (final AdminClient adminClient = createAdminClient()) {
+            adminClient.createTopics(Collections.singletonList(newTopic)).all().get();
+        } catch (InterruptedException | ExecutionException e) {
+            throw new RuntimeException(e);
         }
     }
 
-    private AdminClient createAdminClient() {
-        Properties adminClientConfig = new Properties();
+    public AdminClient createAdminClient() {
+        final Properties adminClientConfig = new Properties();
         adminClientConfig.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, brokerList());
-        Object listeners = effectiveConfig.get(KafkaConfig$.MODULE$.ListenersProp());
+        final Object listeners = effectiveConfig.get(KafkaConfig$.MODULE$.ListenersProp());
         if (listeners != null && listeners.toString().contains("SSL")) {
             adminClientConfig.put(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG, effectiveConfig.get(SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG));
             adminClientConfig.put(SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG, ((Password) effectiveConfig.get(SslConfigs.SSL_TRUSTSTORE_PASSWORD_CONFIG)).value());
@@ -210,7 +198,8 @@ public class KafkaEmbedded {
     }
 
     public void deleteTopic(final String topic) {
-        try (AdminClient adminClient = createAdminClient()) {
+        log.debug("Deleting topic { name: {} }", topic);
+        try (final AdminClient adminClient = createAdminClient()) {
             adminClient.deleteTopics(Collections.singletonList(topic)).all().get();
         } catch (InterruptedException | ExecutionException e) {
             if (!(e.getCause() instanceof UnknownTopicOrPartitionException))
