@@ -11,6 +11,23 @@ def config = jobConfig {
 
 
 def job = {
+    // https://github.com/confluentinc/common-tools/blob/master/confluent/config/dev/versions.json
+    def kafkaMuckrakeVersionMap = [
+            "0.10.0": "3.2.x",
+            "0.10.1": "3.2.x",
+            "0.10.2": "3.2.x",
+            "0.11.0": "3.3.x",
+            "1.0": "4.0.x",
+            "1.1": "4.1.x",
+            "2.0": "5.0.x",
+            "2.1": "5.1.x",
+            "2.2": "5.2.x",
+            "2.3": "5.3.x",
+            "trunk": "master",
+            "master": "master"
+
+    ]
+
     // Per KAFKA-7524, Scala 2.12 is the default, yet we currently support the previous minor version.
     stage("Check compilation compatibility with Scala 2.11") {
         sh "gradle"
@@ -22,7 +39,6 @@ def job = {
         sh "./gradlew clean assemble spotlessScalaCheck checkstyleMain checkstyleTest spotbugsMain " +
                 "--no-daemon --stacktrace --continue -PxmlSpotBugsReport=true"
     }
-
     
     if (config.publish && config.isDevJob) {
       configFileProvider([configFile(fileId: 'Gradle Nexus Settings', variable: 'GRADLE_NEXUS_SETTINGS')]) {
@@ -32,9 +48,38 @@ def job = {
       }
     }
 
-    stage("Test") {
-        sh "./gradlew unitTest integrationTest " +
-                "--no-daemon --stacktrace --continue -PtestLoggingEvents=started,passed,skipped,failed -PmaxParallelForks=4 -PignoreFailures=true"
+    stage("Run Tests and build cp-downstream-builds") {
+        def testTargets = ['run-tests', 'cp-downstream-builds']
+
+        def testStages = testTargets.collectEntries {
+            ["Step $it" : {
+                if ("$it" == "run-tests") {
+                    echo "Running unit and integration tests"
+                    sh "./gradlew unitTest integrationTest " +
+                            "--no-daemon --stacktrace --continue -PtestLoggingEvents=started,passed,skipped,failed -PmaxParallelForks=4 -PignoreFailures=true"
+                }
+                else if ("$it" == "cp-downstream-builds") {
+                    echo "Building cp-downstream-builds"
+                    if (config.isPrJob) {
+                        def muckrakeBranch = kafkaMuckrakeVersionMap[env.CHANGE_TARGET]
+                        def forkRepo = "${env.CHANGE_FORK}/kafka.git"
+                        def forkBranch = env.CHANGE_BRANCH
+                        echo "Schedule test-cp-downstream-builds with :"
+                        echo "Muckrake branch : ${muckrakeBranch}"
+                        echo "PR fork repo : ${forkRepo}"
+                        echo "PR fork branch : ${forkBranch}"
+                        buildResult = build job: 'test-cp-downstream-builds', parameters: [
+                                [$class: 'StringParameterValue', name: 'BRANCH', value: muckrakeBranch],
+                                [$class: 'StringParameterValue', name: 'KAFKA_REPO', value: forkRepo],
+                                [$class: 'StringParameterValue', name: 'KAFKA_BRANCH', value: forkBranch]],
+                                propagate: true, wait: true
+                    }
+                }
+            }]
+        }
+
+        testStages.failFast = true
+        parallel testStages
     }
 }
 
