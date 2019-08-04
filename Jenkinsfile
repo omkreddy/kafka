@@ -39,7 +39,7 @@ def job = {
         sh "./gradlew clean assemble spotlessScalaCheck checkstyleMain checkstyleTest spotbugsMain " +
                 "--no-daemon --stacktrace --continue -PxmlSpotBugsReport=true"
     }
-    
+
     if (config.publish && config.isDevJob) {
       configFileProvider([configFile(fileId: 'Gradle Nexus Settings', variable: 'GRADLE_NEXUS_SETTINGS')]) {
           stage("Publish to nexus") {
@@ -78,7 +78,6 @@ def job = {
             }]
         }
 
-        testStages.failFast = true
         parallel testStages
     }
 }
