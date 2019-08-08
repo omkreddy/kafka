@@ -49,16 +49,13 @@ def job = {
     }
 
     stage("Run Tests and build cp-downstream-builds") {
-        def testTargets = ['run-tests', 'cp-downstream-builds']
-
-        def testStages = testTargets.collectEntries {
-            ["Step $it" : {
-                if ("$it" == "run-tests") {
+        def testTargets = [
+                "Step run-tests"           : {
                     echo "Running unit and integration tests"
                     sh "./gradlew unitTest integrationTest " +
                             "--no-daemon --stacktrace --continue -PtestLoggingEvents=started,passed,skipped,failed -PmaxParallelForks=4 -PignoreFailures=true"
-                }
-                else if ("$it" == "cp-downstream-builds") {
+                },
+                "Step cp-downstream-builds": {
                     echo "Building cp-downstream-builds"
                     if (config.isPrJob) {
                         def muckrakeBranch = kafkaMuckrakeVersionMap[env.CHANGE_TARGET]
@@ -76,10 +73,9 @@ def job = {
                                 propagate: true, wait: true
                     }
                 }
-            }]
-        }
+        ]
 
-        parallel testStages
+        parallel testTargets
     }
 }
 
