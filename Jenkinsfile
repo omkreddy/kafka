@@ -13,19 +13,9 @@ def config = jobConfig {
 def job = {
     // https://github.com/confluentinc/common-tools/blob/master/confluent/config/dev/versions.json
     def kafkaMuckrakeVersionMap = [
-            "0.10.0": "3.2.x",
-            "0.10.1": "3.2.x",
-            "0.10.2": "3.2.x",
-            "0.11.0": "3.3.x",
-            "1.0": "4.0.x",
-            "1.1": "4.1.x",
-            "2.0": "5.0.x",
-            "2.1": "5.1.x",
-            "2.2": "5.2.x",
             "2.3": "5.3.x",
             "trunk": "master",
             "master": "master"
-
     ]
 
     // Per KAFKA-7524, Scala 2.12 is the default, yet we currently support the previous minor version.
