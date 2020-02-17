@@ -136,6 +136,62 @@ class PartitionTest extends AbstractPartitionTest {
   }
 
   @Test
+  // Verify that partition.maybeReplaceCurrentWithFutureReplica() and partition.doAppendRecordsToFollowerOrFutureReplica() can run concurrently
+  def testMaybeReplaceCurrentWithFutureReplicaWithAppendRecords(): Unit = {
+    val latch = new CountDownLatch(1)
+
+    logManager.maybeUpdatePreferredLogDir(topicPartition, logDir1.getAbsolutePath)
+    partition.createLogIfNotExists(brokerId, isNew = true, isFutureReplica = false, offsetCheckpoints)
+
+    // append few records to follower replica
+    val records = createRecords(List(new SimpleRecord("k1".getBytes, "v1".getBytes),
+      new SimpleRecord("k2".getBytes, "v2".getBytes)),
+      baseOffset = 0)
+    partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false)
+
+    logManager.maybeUpdatePreferredLogDir(topicPartition, logDir2.getAbsolutePath)
+    partition.maybeCreateFutureReplica(logDir2.getAbsolutePath, offsetCheckpoints)
+
+    // append few records to future replica
+    partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = true)
+
+    val thread1 = new Thread {
+      override def run(): Unit = {
+        latch.await()
+        val records = createRecords(List(new SimpleRecord("k1".getBytes, "v1".getBytes),
+          new SimpleRecord("k2".getBytes, "v2".getBytes)),
+          baseOffset = 2)
+        partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = false)
+        partition.appendRecordsToFollowerOrFutureReplica(records, isFuture = true)
+      }
+    }
+
+    var replaceCurrent = false
+    val thread2 = new Thread {
+      override def run(): Unit = {
+        latch.await()
+        replaceCurrent = partition.maybeReplaceCurrentWithFutureReplica()
+      }
+    }
+
+    thread1.start()
+    thread2.start()
+
+    latch.countDown()
+    thread1.join()
+    thread2.join()
+    if (replaceCurrent) {
+      assertEquals(None, partition.futureLog)
+      assertEquals(logDir2.getAbsolutePath, partition.localLogOrException.dir.getParent)
+      assertEquals(4, partition.localLogOrException.logEndOffset)
+    } else {
+      assertTrue(partition.futureLog.isDefined)
+      assertEquals(logDir1.getAbsolutePath, partition.localLogOrException.dir.getParent)
+      assertEquals(4, partition.localLogOrException.logEndOffset)
+    }
+  }
+
+  @Test
   // Verify that replacement works when the replicas have the same log end offset but different base offsets in the
   // active segment
   def testMaybeReplaceCurrentWithFutureReplicaDifferentBaseOffsets(): Unit = {
