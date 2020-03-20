@@ -342,8 +342,7 @@ class AclAuthorizer extends Authorizer with Logging {
   }
 
   private def matchingAcls(resourceType: ResourceType, resourceName: String): AclSets = {
-    // snapshot immutable aclCache to avoid the need for a readLock that
-    // could be contended during AclChangedNotificationHandler updates
+    // save aclCache reference to a local val to get a consistent view of the cache during acl updates.
     val aclCacheSnapshot = aclCache
       val wildcard = aclCacheSnapshot.get(new ResourcePattern(resourceType, ResourcePattern.WILDCARD_RESOURCE, PatternType.LITERAL))
         .map(_.acls)
