@@ -33,7 +33,6 @@ import org.eclipse.jetty.server.Connector;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.server.Slf4jRequestLog;
 import org.eclipse.jetty.server.handler.ContextHandlerCollection;
 import org.eclipse.jetty.server.handler.DefaultHandler;
 import org.eclipse.jetty.server.handler.RequestLogHandler;
@@ -216,7 +215,9 @@ public class RestServer {
         }
 
         RequestLogHandler requestLogHandler = new RequestLogHandler();
-        Slf4jRequestLog requestLog = new Slf4jRequestLog();
+        // Use fully qualified name to avoid deprecation warning in import statement
+        org.eclipse.jetty.server.Slf4jRequestLog requestLog = new org.eclipse.jetty.server.Slf4jRequestLog();
+        requestLog.setLoggerName(RestServer.class.getCanonicalName());
         requestLog.setLoggerName(RestServer.class.getCanonicalName());
         requestLog.setLogLatency(true);
         requestLogHandler.setRequestLog(requestLog);

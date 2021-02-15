@@ -26,7 +26,6 @@ import org.eclipse.jetty.server.Connector;
 import org.eclipse.jetty.server.Handler;
 import org.eclipse.jetty.server.Server;
 import org.eclipse.jetty.server.ServerConnector;
-import org.eclipse.jetty.server.Slf4jRequestLog;
 import org.eclipse.jetty.server.handler.DefaultHandler;
 import org.eclipse.jetty.server.handler.HandlerCollection;
 import org.eclipse.jetty.server.handler.RequestLogHandler;
@@ -52,6 +51,7 @@ import java.util.concurrent.TimeUnit;
 /**
  * Embedded server for the REST API that provides the control plane for Trogdor.
  */
+@SuppressWarnings("deprecation")
 public class JsonRestServer {
     private static final Logger log = LoggerFactory.getLogger(JsonRestServer.class);
 
@@ -101,7 +101,8 @@ public class JsonRestServer {
         context.addServlet(servletHolder, "/*");
 
         RequestLogHandler requestLogHandler = new RequestLogHandler();
-        Slf4jRequestLog requestLog = new Slf4jRequestLog();
+        // Use fully qualified name to avoid deprecation warning in import statement
+        org.eclipse.jetty.server.Slf4jRequestLog requestLog = new org.eclipse.jetty.server.Slf4jRequestLog();
         requestLog.setLoggerName(JsonRestServer.class.getCanonicalName());
         requestLog.setLogLatency(true);
         requestLogHandler.setRequestLog(requestLog);
