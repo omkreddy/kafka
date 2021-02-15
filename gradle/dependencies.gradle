@@ -71,7 +71,7 @@ versions += [
   gradle: "5.6.2",
   gradleVersionsPlugin: "0.27.0",
   grgit: "4.0.1",
-  httpclient: "4.5.11",
+  httpclient: "4.5.13",
   easymock: "4.1",
   jackson: "2.10.5",
   jacksonDatabind: "2.10.5.1",
