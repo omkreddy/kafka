@@ -58,9 +58,7 @@ versions += [
   gradle: "5.4.1",
   gradleVersionsPlugin: "0.21.0",
   grgit: "3.1.1",
-  httpcomponents: "4.5.7",
-  httpclient: "4.5.8",
-  httpmime: "4.5.2",
+  httpclient: "4.5.13",
   easymock: "4.0.2",
   jackson: "2.10.0",
   jacoco: "0.8.3",
@@ -172,6 +170,6 @@ libs += [
   jfreechart: "jfreechart:jfreechart:$versions.jfreechart",
   mavenArtifact: "org.apache.maven:maven-artifact:$versions.mavenArtifact",
   zstd: "com.github.luben:zstd-jni:$versions.zstd",
-  httpclient: "org.apache.httpcomponents:httpclient:$versions.httpcomponents",
-  httpmime: "org.apache.httpcomponents:httpmime:$versions.httpcomponents"
+  httpclient: "org.apache.httpcomponents:httpclient:$versions.httpclient",
+  httpmime: "org.apache.httpcomponents:httpmime:$versions.httpclient"
 ]
