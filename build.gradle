@@ -74,6 +74,9 @@ allprojects {
 
   repositories {
     mavenCentral()
+    maven {
+      url "https://maven.repository.redhat.com/ga/"
+    }
   }
   
   apply plugin: 'idea'
@@ -99,6 +102,9 @@ allprojects {
         resolutionStrategy {
           dependencySubstitution {
             substitute module("log4j:log4j:1.2.17") because "we use a custom version with security patches" with module("io.confluent:confluent-log4j:1.2.17-cp2")
+          }
+          dependencySubstitution {
+            substitute module("org.codehaus.jackson:jackson-mapper-asl:1.9.13") because "we use a redhat jackson-mapper-asl version with security patches" with module("org.codehaus.jackson:jackson-mapper-asl:1.9.14.jdk17-redhat-00001")
           }
         }
       }
@@ -1283,7 +1289,10 @@ project(':support-metrics-client') {
   group = "io.confluent.support"
 
   dependencies {
-    compile libs.avro
+    compile (libs.avro)  {
+      exclude group: 'org.codehaus.jackson', module: 'jackson-mapper-asl'
+    }
+    compile libs.jacksonMapperAsl
     compile libs.httpclient
     compile libs.httpmime
     compile libs.slf4jlog4j
@@ -1365,7 +1374,10 @@ project(':support-metrics-common') {
   group = "io.confluent.support"
 
   dependencies {
-    compile libs.avro
+    compile (libs.avro)  {
+      exclude group: 'org.codehaus.jackson', module: 'jackson-mapper-asl'
+    }
+    compile libs.jacksonMapperAsl
     compile libs.httpclient
     compile libs.httpmime
     compile libs.slf4jlog4j
