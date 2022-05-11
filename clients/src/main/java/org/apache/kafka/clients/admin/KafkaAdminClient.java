@@ -2820,7 +2820,7 @@ public class KafkaAdminClient extends AdminClient {
     public CreatePartitionsResult createPartitions(final Map<String, NewPartitions> newPartitions,
                                                    final CreatePartitionsOptions options) {
         final Map<String, KafkaFutureImpl<Void>> futures = new HashMap<>(newPartitions.size());
-        final CreatePartitionsTopicCollection topics = new CreatePartitionsTopicCollection(newPartitions.size());
+        final CreatePartitionsTopicCollection topics = new CreatePartitionsTopicCollection(newPartitions.size(), 0);
         for (Map.Entry<String, NewPartitions> entry : newPartitions.entrySet()) {
             final String topic = entry.getKey();
             final NewPartitions newPartition = entry.getValue();

@@ -89,7 +89,7 @@ public final class MessageDataGenerator implements MessageClassGenerator {
         generateFieldDeclarations(struct, isSetElement);
         buffer.printf("%n");
         schemaGenerator.writeSchema(className, buffer);
-        generateClassConstructors(className, struct, isSetElement);
+        generateClassConstructors(className, struct, isSetElement, isTopLevel);
         buffer.printf("%n");
         if (isTopLevel) {
             generateShortAccessor("apiKey", topLevelMessageSpec.get().apiKey().orElse((short) -1));
@@ -219,10 +219,10 @@ public final class MessageDataGenerator implements MessageClassGenerator {
     }
 
     private void generateHashSetSizeArgConstructor(String className) {
-        buffer.printf("public %s(int expectedNumElements) {%n",
+        buffer.printf("public %s(int expectedNumElements, int max) {%n",
             FieldSpec.collectionType(className));
         buffer.incrementIndent();
-        buffer.printf("super(expectedNumElements);%n");
+        buffer.printf("super(expectedNumElements, max);%n");
         buffer.decrementIndent();
         buffer.printf("}%n");
     }
@@ -284,7 +284,7 @@ public final class MessageDataGenerator implements MessageClassGenerator {
         headerGenerator.addImport(MessageGenerator.LIST_CLASS);
         buffer.printf("public %s duplicate() {%n", FieldSpec.collectionType(className));
         buffer.incrementIndent();
-        buffer.printf("%s _duplicate = new %s(size());%n",
+        buffer.printf("%s _duplicate = new %s(size(), 0);%n",
             FieldSpec.collectionType(className), FieldSpec.collectionType(className));
         buffer.printf("for (%s _element : this) {%n", className);
         buffer.incrementIndent();
@@ -366,11 +366,22 @@ public final class MessageDataGenerator implements MessageClassGenerator {
         }
     }
 
-    private void generateClassConstructors(String className, StructSpec struct, boolean isSetElement) {
+    private void generateClassConstructors(String className, StructSpec struct, boolean isSetElement, boolean isToplevel) {
         headerGenerator.addImport(MessageGenerator.READABLE_CLASS);
-        buffer.printf("public %s(Readable _readable, short _version) {%n", className);
+        if (isToplevel) {
+            buffer.printf("public %s(Readable _readable, short _version) {%n", className);
+            buffer.incrementIndent();
+            buffer.printf("// bound allocations to twice the remaining buffer%n");
+            buffer.printf("// (2x because collections for keyed fields overallocate for better key distribution)%n");
+            buffer.printf("this(_readable, _version, 2 * _readable.remaining() + 1);%n");
+            buffer.decrementIndent();
+            buffer.printf("}%n");
+            buffer.printf("%n");
+        }
+
+        buffer.printf("public %s(Readable _readable, short _version, int _limit) {%n", className);
         buffer.incrementIndent();
-        buffer.printf("read(_readable, _version);%n");
+        buffer.printf("read(_readable, _version, _limit);%n");
         generateConstructorEpilogue(isSetElement);
         buffer.decrementIndent();
         buffer.printf("}%n");
@@ -409,7 +420,7 @@ public final class MessageDataGenerator implements MessageClassGenerator {
                                      Versions parentVersions) {
         headerGenerator.addImport(MessageGenerator.READABLE_CLASS);
         buffer.printf("@Override%n");
-        buffer.printf("public void read(Readable _readable, short _version) {%n");
+        buffer.printf("public void read(Readable _readable, short _version, int _limit) {%n");
         buffer.incrementIndent();
         VersionConditional.forVersions(parentVersions, struct.versions()).
             allowMembershipCheckAlwaysFalse(false).
@@ -550,7 +561,7 @@ public final class MessageDataGenerator implements MessageClassGenerator {
         } else if (type instanceof FieldType.Float64FieldType) {
             return "_readable.readDouble()";
         } else if (type.isStruct()) {
-            return String.format("new %s(_readable, _version)", type.toString());
+            return String.format("new %s(_readable, _version, _limit)", type.toString());
         } else {
             throw new RuntimeException("Unsupported field type " + type);
         }
@@ -610,7 +621,7 @@ public final class MessageDataGenerator implements MessageClassGenerator {
                 buffer.printf("%s_readable.readByteBuffer(%s)%s",
                     assignmentPrefix, lengthVar, assignmentSuffix);
             } else {
-                buffer.printf("byte[] newBytes = new byte[%s];%n", lengthVar);
+                buffer.printf("byte[] newBytes = MessageUtil.newByteArray(%s, _limit);%n", lengthVar);
                 buffer.printf("_readable.readArray(newBytes);%n");
                 buffer.printf("%snewBytes%s", assignmentPrefix, assignmentSuffix);
             }
@@ -621,14 +632,14 @@ public final class MessageDataGenerator implements MessageClassGenerator {
             FieldType.ArrayType arrayType = (FieldType.ArrayType) type;
             if (isStructArrayWithKeys) {
                 headerGenerator.addImport(MessageGenerator.IMPLICIT_LINKED_HASH_MULTI_COLLECTION_CLASS);
-                buffer.printf("%s newCollection = new %s(%s);%n",
+                buffer.printf("%s newCollection = new %s(%s, _limit);%n",
                     FieldSpec.collectionType(arrayType.elementType().toString()),
                         FieldSpec.collectionType(arrayType.elementType().toString()), lengthVar);
             } else {
                 headerGenerator.addImport(MessageGenerator.ARRAYLIST_CLASS);
                 String boxedArrayType =
                     arrayType.elementType().getBoxedJavaType(headerGenerator);
-                buffer.printf("ArrayList<%s> newCollection = new ArrayList<>(%s);%n", boxedArrayType, lengthVar);
+                buffer.printf("List<%s> newCollection = MessageUtil.newArrayList(%s, _limit);%n", boxedArrayType, lengthVar);
             }
             buffer.printf("for (int i = 0; i < %s; i++) {%n", lengthVar);
             buffer.incrementIndent();
@@ -1470,8 +1481,13 @@ public final class MessageDataGenerator implements MessageClassGenerator {
                     String newArrayName =
                         String.format("new%s", field.capitalizedCamelCaseName());
                     String type = field.concreteJavaType(headerGenerator, structRegistry);
-                    buffer.printf("%s %s = new %s(%s.size());%n",
-                        type, newArrayName, type, target.sourceVariable());
+                    if (structRegistry.isStructArrayWithKeys(field)) {
+                        buffer.printf("%s %s = new %s(%s.size(), 0);%n",
+                                type, newArrayName, type, target.sourceVariable());
+                    } else {
+                        buffer.printf("%s %s = MessageUtil.newArrayList(%s.size(), 0);%n",
+                                type, newArrayName, target.sourceVariable());
+                    }
                     FieldType.ArrayType arrayType = (FieldType.ArrayType) field.type();
                     buffer.printf("for (%s _element : %s) {%n",
                         arrayType.elementType().getBoxedJavaType(headerGenerator),

@@ -53,7 +53,7 @@ public class ImplicitLinkedHashMultiCollectionTest {
 
     @Test
     public void testInsertDelete() {
-        ImplicitLinkedHashMultiCollection<TestElement> multiSet = new ImplicitLinkedHashMultiCollection<>(100);
+        ImplicitLinkedHashMultiCollection<TestElement> multiSet = new ImplicitLinkedHashMultiCollection<>(100, 0);
         TestElement e1 = new TestElement(1);
         TestElement e2 = new TestElement(1);
         TestElement e3 = new TestElement(2);
@@ -103,7 +103,7 @@ public class ImplicitLinkedHashMultiCollectionTest {
 
     @Test
     public void testEnlargement() {
-        ImplicitLinkedHashMultiCollection<TestElement> multiSet = new ImplicitLinkedHashMultiCollection<>(5);
+        ImplicitLinkedHashMultiCollection<TestElement> multiSet = new ImplicitLinkedHashMultiCollection<>(5, 0);
         assertEquals(11, multiSet.numSlots());
         TestElement[] testElements = {
             new TestElement(100),

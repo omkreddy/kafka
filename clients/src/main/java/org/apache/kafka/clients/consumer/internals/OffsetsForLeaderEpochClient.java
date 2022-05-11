@@ -52,7 +52,7 @@ public class OffsetsForLeaderEpochClient extends AsyncClient<
     @Override
     protected AbstractRequest.Builder<OffsetsForLeaderEpochRequest> prepareRequest(
             Node node, Map<TopicPartition, SubscriptionState.FetchPosition> requestData) {
-        OffsetForLeaderTopicCollection topics = new OffsetForLeaderTopicCollection(requestData.size());
+        OffsetForLeaderTopicCollection topics = new OffsetForLeaderTopicCollection(requestData.size(), 0);
         requestData.forEach((topicPartition, fetchPosition) ->
             fetchPosition.offsetEpoch.ifPresent(fetchEpoch -> {
                 OffsetForLeaderTopic topic = topics.find(topicPartition.topic());

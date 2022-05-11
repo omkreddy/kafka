@@ -1910,7 +1910,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     val createTopicsRequest = request.body[CreateTopicsRequest]
-    val results = new CreatableTopicResultCollection(createTopicsRequest.data.topics.size)
+    val results = new CreatableTopicResultCollection(createTopicsRequest.data.topics.size, 0)
     if (!zkSupport.controller.isActive) {
       createTopicsRequest.data.topics.forEach { topic =>
         results.add(new CreatableTopicResult().setName(topic.name)
@@ -2045,7 +2045,7 @@ class KafkaApis(val requestChannel: RequestChannel,
     }
 
     val deleteTopicRequest = request.body[DeleteTopicsRequest]
-    val results = new DeletableTopicResultCollection(deleteTopicRequest.numberOfTopics())
+    val results = new DeletableTopicResultCollection(deleteTopicRequest.numberOfTopics(), 0)
     val toDelete = mutable.Set[String]()
     if (!zkSupport.controller.isActive) {
       deleteTopicRequest.topics().forEach { topic =>

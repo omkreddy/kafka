@@ -18,11 +18,13 @@
 package org.apache.kafka.common.protocol;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import org.apache.kafka.common.errors.InvalidRequestException;
 import org.apache.kafka.common.protocol.types.RawTaggedField;
 import org.apache.kafka.common.utils.Utils;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
@@ -214,5 +216,25 @@ public final class MessageUtil {
                 buffer.position() == 0 &&
                 buffer.limit() == buffer.array().length) return buffer.array();
         else return Utils.toArray(buffer);
+    }
+
+    public static byte[] newByteArray(int size, int allocationBoundBytes) {
+        if (allocationBoundBytes > 0
+                && size > allocationBoundBytes) {
+            throw new InvalidRequestException("Attempt to allocate byte[] of size " + size +
+                    " but limit is " + allocationBoundBytes + " bytes.");
+        } else {
+            return new byte[size];
+        }
+    }
+
+    public static <T> ArrayList<T> newArrayList(int initialCapacity, int allocationBoundBytes) {
+        if (allocationBoundBytes > 0
+                && initialCapacity > allocationBoundBytes / 4) {  // assume 32bit pointers
+            throw new InvalidRequestException("Attempt to create ArrayList with initial capacity " + initialCapacity +
+                    " which would require allocating more bytes than limit of " + allocationBoundBytes + " bytes.");
+        } else {
+            return new ArrayList<>(initialCapacity);
+        }
     }
 }

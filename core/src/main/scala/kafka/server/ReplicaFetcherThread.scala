@@ -347,7 +347,7 @@ class ReplicaFetcherThread(name: String,
       return Map.empty
     }
 
-    val topics = new OffsetForLeaderTopicCollection(partitions.size)
+    val topics = new OffsetForLeaderTopicCollection(partitions.size, 0)
     partitions.forKeyValue { (topicPartition, epochData) =>
       var topic = topics.find(topicPartition.topic)
       if (topic == null) {

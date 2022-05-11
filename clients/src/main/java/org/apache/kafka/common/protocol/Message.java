@@ -76,7 +76,22 @@ public interface Message {
     void write(Writable writable, ObjectSerializationCache cache, short version);
 
     /**
-     * Reads this message from the given Readable.  This will overwrite all
+     * Reads this message from the given {@code readable}.  This will overwrite all
+     * relevant fields with information from the byte buffer,
+     * unless doing so would require allocating more than the given {@code limit}.
+     *
+     * @param readable      The source readable.
+     * @param version       The version to use.
+     * @param limit         An upper bound in the number of bytes which may be allocated to represent the message
+     *
+     * @throws {@see org.apache.kafka.common.errors.UnsupportedVersionException}
+     *                      If the specified version is too new to be supported
+     *                      by this software.
+     */
+    void read(Readable readable, short version, int limit);
+
+    /**
+     * Reads this message from the given {@code readable}.  This will overwrite all
      * relevant fields with information from the byte buffer.
      *
      * @param readable      The source readable.
@@ -86,7 +101,9 @@ public interface Message {
      *                      If the specified version is too new to be supported
      *                      by this software.
      */
-    void read(Readable readable, short version);
+    default void read(Readable readable, short version) {
+        read(readable, version, 0);
+    }
 
     /**
      * Returns a list of tagged fields which this software can't understand.

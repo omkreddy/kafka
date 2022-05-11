@@ -442,9 +442,12 @@ public final class FieldSpec {
                 throw new RuntimeException("Invalid default for array field " +
                     name + ".  The only valid default for an array field " +
                     "is the empty array or null.");
-            }
-            return String.format("new %s(0)",
+            } else if (structRegistry.isStructArrayWithKeys(this)) {
+                return String.format("new %s(0, 0)",
                 concreteJavaType(headerGenerator, structRegistry));
+            } else {
+                return String.format("MessageUtil.newArrayList(0, 0)");
+            }
         } else {
             throw new RuntimeException("Unsupported field type " + type);
         }

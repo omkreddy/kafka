@@ -45,11 +45,11 @@ import java.util.List;
 public class ImplicitLinkedHashMultiCollection<E extends ImplicitLinkedHashCollection.Element>
         extends ImplicitLinkedHashCollection<E> {
     public ImplicitLinkedHashMultiCollection() {
-        super(0);
+        super(0, 0);
     }
 
-    public ImplicitLinkedHashMultiCollection(int expectedNumElements) {
-        super(expectedNumElements);
+    public ImplicitLinkedHashMultiCollection(int expectedNumElements, int allocationBoundBytes) {
+        super(expectedNumElements, allocationBoundBytes);
     }
 
     public ImplicitLinkedHashMultiCollection(Iterator<E> iter) {

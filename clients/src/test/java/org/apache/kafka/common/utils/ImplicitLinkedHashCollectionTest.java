@@ -115,7 +115,7 @@ public class ImplicitLinkedHashCollectionTest {
 
     @Test
     public void testInsertDelete() {
-        ImplicitLinkedHashCollection<TestElement> coll = new ImplicitLinkedHashCollection<>(100);
+        ImplicitLinkedHashCollection<TestElement> coll = new ImplicitLinkedHashCollection<>(100, 0);
         assertTrue(coll.add(new TestElement(1)));
         TestElement second = new TestElement(2);
         assertTrue(coll.add(second));
@@ -458,7 +458,7 @@ public class ImplicitLinkedHashCollectionTest {
 
     @Test
     public void testCollisions() {
-        ImplicitLinkedHashCollection<TestElement> coll = new ImplicitLinkedHashCollection<>(5);
+        ImplicitLinkedHashCollection<TestElement> coll = new ImplicitLinkedHashCollection<>(5, 0);
         assertEquals(11, coll.numSlots());
         assertTrue(coll.add(new TestElement(11)));
         assertTrue(coll.add(new TestElement(0)));
@@ -474,7 +474,7 @@ public class ImplicitLinkedHashCollectionTest {
 
     @Test
     public void testEnlargement() {
-        ImplicitLinkedHashCollection<TestElement> coll = new ImplicitLinkedHashCollection<>(5);
+        ImplicitLinkedHashCollection<TestElement> coll = new ImplicitLinkedHashCollection<>(5, 0);
         assertEquals(11, coll.numSlots());
         for (int i = 0; i < 6; i++) {
             assertTrue(coll.add(new TestElement(i)));

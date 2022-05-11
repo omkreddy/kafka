@@ -1651,7 +1651,7 @@ public final class QuorumController implements Controller {
                 request.validateOnly());
         }).thenApply(result -> {
             UpdateFeaturesResponseData responseData = new UpdateFeaturesResponseData();
-            responseData.setResults(new UpdateFeaturesResponseData.UpdatableFeatureResultCollection(result.size()));
+            responseData.setResults(new UpdateFeaturesResponseData.UpdatableFeatureResultCollection(result.size(), 0));
             result.forEach((featureName, error) -> responseData.results().add(
                 new UpdateFeaturesResponseData.UpdatableFeatureResult()
                     .setFeature(featureName)

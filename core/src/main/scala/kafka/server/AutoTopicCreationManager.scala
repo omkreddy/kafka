@@ -160,7 +160,7 @@ class DefaultAutoTopicCreationManager(
     creatableTopics: Map[String, CreatableTopic],
     metadataRequestContext: Option[RequestContext]
   ): Seq[MetadataResponseTopic] = {
-    val topicsToCreate = new CreateTopicsRequestData.CreatableTopicCollection(creatableTopics.size)
+    val topicsToCreate = new CreateTopicsRequestData.CreatableTopicCollection(creatableTopics.size, 0)
     topicsToCreate.addAll(creatableTopics.values.asJavaCollection)
 
     val createTopicsRequest = new CreateTopicsRequest.Builder(

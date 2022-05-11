@@ -687,7 +687,7 @@ public class RequestResponseTest {
 
     @Test
     public void testSerializeWithHeader() {
-        CreatableTopicCollection topicsToCreate = new CreatableTopicCollection(1);
+        CreatableTopicCollection topicsToCreate = new CreatableTopicCollection(1, 0);
         topicsToCreate.add(new CreatableTopic()
                                .setName("topic")
                                .setNumPartitions(3)

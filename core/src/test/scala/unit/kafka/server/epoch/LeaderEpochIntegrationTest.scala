@@ -279,7 +279,7 @@ class LeaderEpochIntegrationTest extends QuorumTestHarness with Logging {
   private[epoch] class TestFetcherThread(sender: BlockingSend) extends Logging {
 
     def leaderOffsetsFor(partitions: Map[TopicPartition, Int]): Map[TopicPartition, EpochEndOffset] = {
-      val topics = new OffsetForLeaderTopicCollection(partitions.size)
+      val topics = new OffsetForLeaderTopicCollection(partitions.size, 0)
       partitions.forKeyValue { (topicPartition, leaderEpoch) =>
         var topic = topics.find(topicPartition.topic)
         if (topic == null) {

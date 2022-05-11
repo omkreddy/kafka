@@ -17,6 +17,8 @@
 
 package org.apache.kafka.common.utils;
 
+import org.apache.kafka.common.errors.InvalidRequestException;
+
 import java.util.AbstractCollection;
 import java.util.AbstractSequentialList;
 import java.util.AbstractSet;
@@ -533,7 +535,7 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      * Create a new ImplicitLinkedHashCollection.
      */
     public ImplicitLinkedHashCollection() {
-        this(0);
+        this(0, 0);
     }
 
     /**
@@ -543,8 +545,8 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      *                              This is used to optimize by setting the capacity ahead
      *                              of time rather than growing incrementally.
      */
-    public ImplicitLinkedHashCollection(int expectedNumElements) {
-        clear(expectedNumElements);
+    public ImplicitLinkedHashCollection(int expectedNumElements, int allocationBoundBytes) {
+        clear(expectedNumElements, allocationBoundBytes);
     }
 
     /**
@@ -554,7 +556,7 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      *                              to the set.
      */
     public ImplicitLinkedHashCollection(Iterator<E> iter) {
-        clear(0);
+        clear(0, 0);
         while (iter.hasNext()) {
             mustAdd(iter.next());
         }
@@ -565,7 +567,7 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      */
     @Override
     final public void clear() {
-        clear(elements.length);
+        clear(elements.length, 0);
     }
 
     /**
@@ -588,15 +590,23 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      * Removes all of the elements from this set, and resets the set capacity
      * based on the provided expected number of elements.
      */
-    final public void clear(int expectedNumElements) {
+    final public void clear(int expectedNumElements, int allocationBoundBytes) {
         if (expectedNumElements == 0) {
             // Optimize away object allocations for empty sets.
             this.head = HeadElement.EMPTY;
             this.elements = EMPTY_ELEMENTS;
             this.size = 0;
         } else {
+            if (allocationBoundBytes > 0
+                    // estimate #bytes by assuming 32bit pointers
+                    && expectedNumElements > allocationBoundBytes / 4) {
+                throw new InvalidRequestException("Attempt to create " + getClass().getSimpleName() +
+                        " with " + expectedNumElements + " expected elements, " +
+                        "which would require allocating more bytes than limit of " + allocationBoundBytes + " bytes.");
+            }
             this.head = new HeadElement();
-            this.elements = new Element[calculateCapacity(expectedNumElements)];
+            int size = calculateCapacity(expectedNumElements);
+            this.elements = new Element[size];
             this.size = 0;
         }
     }

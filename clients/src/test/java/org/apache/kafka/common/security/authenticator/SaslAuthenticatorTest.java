@@ -1905,7 +1905,7 @@ public class SaslAuthenticatorTest {
             ScramCredentialUtils.createCache(credentialCache, Arrays.asList(saslMechanism));
 
         Supplier<ApiVersionsResponse> apiVersionSupplier = () -> {
-            ApiVersionCollection versionCollection = new ApiVersionCollection(2);
+            ApiVersionCollection versionCollection = new ApiVersionCollection(2, 0);
             versionCollection.add(new ApiVersion().setApiKey(ApiKeys.SASL_HANDSHAKE.id).setMinVersion((short) 0).setMaxVersion((short) 100));
             versionCollection.add(new ApiVersion().setApiKey(ApiKeys.SASL_AUTHENTICATE.id).setMinVersion((short) 0).setMaxVersion((short) 100));
             return new ApiVersionsResponse(new ApiVersionsResponseData().setApiKeys(versionCollection));

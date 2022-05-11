@@ -60,7 +60,7 @@ class FetchSessionTest {
   }
 
   private def dummyCreate(size: Int): FetchSession.CACHE_MAP = {
-    val cacheMap = new FetchSession.CACHE_MAP(size)
+    val cacheMap = new FetchSession.CACHE_MAP(size, 0)
     for (i <- 0 until size) {
       cacheMap.add(new CachedPartition("test", Uuid.randomUuid(), i))
     }

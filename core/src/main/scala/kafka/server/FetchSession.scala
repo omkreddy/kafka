@@ -408,7 +408,7 @@ class FullFetchContext(private val time: Time,
 
   override def updateAndGenerateResponseData(updates: FetchSession.RESP_MAP): FetchResponse = {
     def createNewSession: FetchSession.CACHE_MAP = {
-      val cachedPartitions = new FetchSession.CACHE_MAP(updates.size)
+      val cachedPartitions = new FetchSession.CACHE_MAP(updates.size, 0)
       updates.forEach { (part, respData) =>
         val reqData = fetchData.get(part)
         cachedPartitions.mustAdd(new CachedPartition(part, reqData, respData))

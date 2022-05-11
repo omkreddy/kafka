@@ -716,7 +716,7 @@ class KafkaApisTest {
 
     when(controller.isActive).thenReturn(true)
 
-    val topics = new CreateTopicsRequestData.CreatableTopicCollection(2)
+    val topics = new CreateTopicsRequestData.CreatableTopicCollection(2, 0)
     val topicToCreate = new CreateTopicsRequestData.CreatableTopic()
       .setName(authorizedTopic)
     topics.add(topicToCreate)
