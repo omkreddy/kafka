@@ -138,6 +138,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.apache.kafka.common.protocol.ApiKeys.LIST_OFFSETS;
+import static org.apache.kafka.common.security.authenticator.SaslServerAuthenticator.SASL_HANDSHAKE_CONFIG_PREFIX;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -210,6 +211,136 @@ public class SaslAuthenticatorTest {
 
         server = createEchoServer(securityProtocol);
         checkAuthenticationAndReauthentication(securityProtocol, node);
+    }
+
+    /**
+     * Test SASL/PLAIN with sasl.authentication.max.receive.size config
+     */
+    @Test
+    public void testSaslAuthenticationMaxReceiveSize() throws Exception {
+        SecurityProtocol securityProtocol = SecurityProtocol.SASL_PLAINTEXT;
+        configureMechanisms("PLAIN", Collections.singletonList("PLAIN"));
+
+        // test auth with 1KB receive size
+        saslServerConfigs.put(BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "1024");
+        server = createEchoServer(securityProtocol);
+
+        // test valid sasl authentication
+        String node1 = "valid";
+        checkAuthenticationAndReauthentication(securityProtocol, node1);
+
+        // test with handshake request with large mechanism string
+        byte[] bytes = new byte[1024];
+        new Random().nextBytes(bytes);
+        String mechanism = new String(bytes, StandardCharsets.UTF_8);
+        String node2 = "invalid1";
+        createClientConnection(SecurityProtocol.PLAINTEXT, node2);
+        SaslHandshakeRequest handshakeRequest = buildSaslHandshakeRequest(mechanism, ApiKeys.SASL_HANDSHAKE.latestVersion());
+        RequestHeader header = new RequestHeader(ApiKeys.SASL_HANDSHAKE, handshakeRequest.version(), "someclient", nextCorrelationId++);
+        NetworkSend send = new NetworkSend(node2, handshakeRequest.toSend(header));
+        selector.send(send);
+        //we will get exception in server and connection gets closed.
+        NetworkTestUtils.waitForChannelClose(selector, node2, ChannelState.READY.state());
+        selector.close();
+
+        String node3 = "invalid2";
+        createClientConnection(SecurityProtocol.PLAINTEXT, node3);
+        sendHandshakeRequestReceiveResponse(node3, ApiKeys.SASL_HANDSHAKE.latestVersion());
+
+        // test with sasl authenticate request with large auth_byes string
+        String authString = "\u0000" + TestJaasConfig.USERNAME + "\u0000" +  new String(bytes, StandardCharsets.UTF_8);
+        ByteBuffer authBuf = ByteBuffer.wrap(Utils.utf8(authString));
+        SaslAuthenticateRequestData data = new SaslAuthenticateRequestData().setAuthBytes(authBuf.array());
+        SaslAuthenticateRequest request = new SaslAuthenticateRequest.Builder(data).build();
+        header = new RequestHeader(ApiKeys.SASL_AUTHENTICATE, request.version(), "someclient", nextCorrelationId++);
+        send = new NetworkSend(node3, request.toSend(header));
+        selector.send(send);
+        NetworkTestUtils.waitForChannelClose(selector, node3, ChannelState.READY.state());
+        server.verifyAuthenticationMetrics(1, 2);
+    }
+
+    /**
+     * Test SASL/PLAIN with listener.name.sasl_plaintext.plain.sasl.authentication.max.receive.size config
+     */
+    @Test
+    public void testAuthConfiguredSaslMechanismMaxReceiveSize() throws Exception {
+        SecurityProtocol securityProtocol = SecurityProtocol.SASL_PLAINTEXT;
+        configureMechanisms("PLAIN", Collections.singletonList("PLAIN"));
+        String listenerMechanismPrefix = ListenerName.forSecurityProtocol(securityProtocol).saslMechanismConfigPrefix("PLAIN");
+
+        // max receive size not configured && mechanism max receive size not configured. Authentication succeeds
+        server = createEchoServer(securityProtocol);
+        String node1 = "valid1";
+        checkAuthenticationAndReauthentication(securityProtocol, node1);
+        server.verifyAuthenticationMetrics(1, 0);
+
+        // max receive size not configured && mechanism max receive size configured
+        // Good path => mechanism max receive size configured to 1KB. Authentication succeeds
+        saslServerConfigs.put(listenerMechanismPrefix + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "1024");
+        server = createEchoServer(securityProtocol);
+        String node2 = "valid2";
+        checkAuthenticationAndReauthentication(securityProtocol, node2);
+        server.verifyAuthenticationMetrics(1, 0);
+
+        // Bad path => mechanism max receive size configured to 16B. Server closes connection during authentication ending in AUTHENTICATE state
+        saslServerConfigs.put(listenerMechanismPrefix + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "16");
+        // data size greater than 16B
+        saslClientConfigs.put(SaslConfigs.SASL_JAAS_CONFIG,
+                TestJaasConfig.jaasConfigProperty("PLAIN", "invaliduser", "invalidpassword"));
+        server = createEchoServer(securityProtocol);
+        String node3 = "invalid1";
+        createClientConnection(securityProtocol, node3);
+        NetworkTestUtils.waitForChannelClose(selector, node3, ChannelState.State.AUTHENTICATE);
+        server.verifyAuthenticationMetrics(0, 1);
+
+        // max receive size configured && mechanism max receive size configured
+        saslServerConfigs.put(listenerMechanismPrefix + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "2048");
+        saslServerConfigs.put(BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "16");
+        // set handshake size to 1KB in order to avoid max receive size exception during handshake
+        saslServerConfigs.put(SASL_HANDSHAKE_CONFIG_PREFIX + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "1024");
+        server = createEchoServer(securityProtocol);
+        String node4 = "invalid2";
+        createClientConnection(securityProtocol, node4);
+        // Server will close connection during authentication ending in AUTHENTICATE state
+        NetworkTestUtils.waitForChannelClose(selector, node4, ChannelState.State.AUTHENTICATION_FAILED);
+        server.verifyAuthenticationMetrics(0, 1);
+    }
+
+    /**
+     * Test SASL/PLAIN with sasl.authentication.max.handshake.receive.size config
+     */
+    @Test
+    public void testAuthConfiguredSaslHandshakeMaxReceiveSize() throws Exception {
+        SecurityProtocol securityProtocol = SecurityProtocol.SASL_PLAINTEXT;
+        configureMechanisms("PLAIN", Collections.singletonList("PLAIN"));
+
+        // max receive size not configured && max handshake receive size configured. Authentication successful
+        saslServerConfigs.put(SASL_HANDSHAKE_CONFIG_PREFIX + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "1024");
+        server = createEchoServer(securityProtocol);
+        String node1 = "valid";
+        checkAuthenticationAndReauthentication(securityProtocol, node1);
+
+        // use request size greater than 1KB. Server closes connection during authentication in READY state
+        byte[] bytes = new byte[1024];
+        new Random().nextBytes(bytes);
+        String mechanism = new String(bytes, StandardCharsets.UTF_8);
+        String node2 = "invalid1";
+        createClientConnection(SecurityProtocol.PLAINTEXT, node2);
+        SaslHandshakeRequest handshakeRequest = buildSaslHandshakeRequest(mechanism, ApiKeys.SASL_HANDSHAKE.latestVersion());
+        RequestHeader header = new RequestHeader(ApiKeys.SASL_HANDSHAKE, handshakeRequest.version(), "someclient", nextCorrelationId++);
+        NetworkSend send = new NetworkSend(node2, handshakeRequest.toSend(header));
+        selector.send(send);
+        NetworkTestUtils.waitForChannelClose(selector, node2, ChannelState.READY.state());
+        selector.close();
+        server.verifyAuthenticationMetrics(1, 1);
+
+        // max receive size configured to 16B && max handshake receive size configured to 2KB. Handshake successful
+        saslServerConfigs.put(SASL_HANDSHAKE_CONFIG_PREFIX + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "2048");
+        saslServerConfigs.put(BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG, "16");
+        server = createEchoServer(securityProtocol);
+        String node3 = "valid2";
+        createClientConnection(SecurityProtocol.PLAINTEXT, node3);
+        sendHandshakeRequestReceiveResponse(node3, ApiKeys.SASL_HANDSHAKE.latestVersion());
     }
 
     /**
@@ -1962,9 +2093,10 @@ public class SaslAuthenticatorTest {
                                                                        TransportLayer transportLayer,
                                                                        Map<String, Subject> subjects,
                                                                        Map<String, Long> connectionsMaxReauthMsByMechanism,
+                                                                       Map<String, Integer> saslServerMaxReceiveSizeByMechanism,
                                                                        ChannelMetadataRegistry metadataRegistry) {
                 return new SaslServerAuthenticator(configs, callbackHandlers, id, subjects, null, listenerName,
-                    securityProtocol, transportLayer, connectionsMaxReauthMsByMechanism, metadataRegistry, time, apiVersionSupplier) {
+                    securityProtocol, transportLayer, connectionsMaxReauthMsByMechanism, saslServerMaxReceiveSizeByMechanism, metadataRegistry, time, apiVersionSupplier) {
                     @Override
                     protected void enableKafkaSaslAuthenticateHeaders(boolean flag) {
                         // Don't enable Kafka SASL_AUTHENTICATE headers

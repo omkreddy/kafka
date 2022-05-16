@@ -27,6 +27,7 @@ import org.apache.kafka.common.errors.UnsupportedSaslMechanismException;
 import org.apache.kafka.common.errors.UnsupportedVersionException;
 import org.apache.kafka.common.message.SaslAuthenticateResponseData;
 import org.apache.kafka.common.message.SaslHandshakeResponseData;
+import org.apache.kafka.common.network.InvalidReceiveException;
 import org.apache.kafka.common.network.Authenticator;
 import org.apache.kafka.common.network.ByteBufferSend;
 import org.apache.kafka.common.network.ChannelBuilders;
@@ -88,9 +89,8 @@ import java.util.Optional;
 import java.util.function.Supplier;
 
 public class SaslServerAuthenticator implements Authenticator {
-    // GSSAPI limits requests to 64K, but we allow a bit extra for custom SASL mechanisms
-    static final int MAX_RECEIVE_SIZE = 524288;
     private static final Logger LOG = LoggerFactory.getLogger(SaslServerAuthenticator.class);
+    public static final String SASL_HANDSHAKE_CONFIG_PREFIX = "sasl.handshake.";
 
     /**
      * The internal state transitions for initial authentication of a channel on the
@@ -140,11 +140,14 @@ public class SaslServerAuthenticator implements Authenticator {
     private String saslMechanism;
 
     // buffers used in `authenticate`
+    private Integer saslAuthRequestMaxReceiveSize;
     private NetworkReceive netInBuffer;
     private Send netOutBuffer;
     private Send authenticationFailureSend = null;
     // flag indicating if sasl tokens are sent as Kafka SaslAuthenticate request/responses
     private boolean enableKafkaSaslAuthenticateHeaders;
+    private final Map<String, Integer> saslServerMaxReceiveSizeByMechanism;
+    private Integer saslAuthRequestMaxHandshakeReceiveSize;
 
     public SaslServerAuthenticator(Map<String, ?> configs,
                                    Map<String, AuthenticateCallbackHandler> callbackHandlers,
@@ -155,6 +158,7 @@ public class SaslServerAuthenticator implements Authenticator {
                                    SecurityProtocol securityProtocol,
                                    TransportLayer transportLayer,
                                    Map<String, Long> connectionsMaxReauthMsByMechanism,
+                                   Map<String, Integer> saslServerMaxReceiveSizeByMechanism,
                                    ChannelMetadataRegistry metadataRegistry,
                                    Time time,
                                    Supplier<ApiVersionsResponse> apiVersionSupplier) {
@@ -163,6 +167,7 @@ public class SaslServerAuthenticator implements Authenticator {
         this.subjects = subjects;
         this.listenerName = listenerName;
         this.securityProtocol = securityProtocol;
+        this.saslServerMaxReceiveSizeByMechanism = saslServerMaxReceiveSizeByMechanism;
         this.enableKafkaSaslAuthenticateHeaders = false;
         this.transportLayer = transportLayer;
         this.connectionsMaxReauthMsByMechanism = connectionsMaxReauthMsByMechanism;
@@ -189,6 +194,17 @@ public class SaslServerAuthenticator implements Authenticator {
         // Note that the old principal builder does not support SASL, so we do not need to pass the
         // authenticator or the transport layer
         this.principalBuilder = ChannelBuilders.createPrincipalBuilder(configs, kerberosNameParser, null);
+
+        saslAuthRequestMaxReceiveSize = (Integer) configs.get(BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG);
+        if (saslAuthRequestMaxReceiveSize == null)
+            saslAuthRequestMaxReceiveSize = BrokerSecurityConfigs.DEFAULT_SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE;
+
+        if (configs.get(SASL_HANDSHAKE_CONFIG_PREFIX + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG) == null)
+            saslAuthRequestMaxHandshakeReceiveSize = saslAuthRequestMaxReceiveSize;
+        else
+            saslAuthRequestMaxHandshakeReceiveSize = Integer.valueOf(
+                    (String) configs.get(SASL_HANDSHAKE_CONFIG_PREFIX + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG));
+
     }
 
     private void createSaslServer(String mechanism) throws IOException {
@@ -252,9 +268,13 @@ public class SaslServerAuthenticator implements Authenticator {
             }
 
             // allocate on heap (as opposed to any socket server memory pool)
-            if (netInBuffer == null) netInBuffer = new NetworkReceive(MAX_RECEIVE_SIZE, connectionId);
+            if (netInBuffer == null) netInBuffer = new NetworkReceive(maxNetInBufferSize(), connectionId);
 
-            netInBuffer.readFrom(transportLayer);
+            try {
+                netInBuffer.readFrom(transportLayer);
+            } catch (InvalidReceiveException e) {
+                throw new SaslAuthenticationException("Failing SASL authentication due to invalid receive size", e);
+            }
             if (!netInBuffer.complete())
                 return;
             netInBuffer.payload().rewind();
@@ -295,6 +315,10 @@ public class SaslServerAuthenticator implements Authenticator {
             LOG.debug("Failed during {}: {}", reauthInfo.authenticationOrReauthenticationText(), e.getMessage());
             throw e;
         }
+    }
+
+    private int maxNetInBufferSize() {
+        return (saslMechanism == null) ? saslAuthRequestMaxHandshakeReceiveSize : saslServerMaxReceiveSizeByMechanism.get(saslMechanism);
     }
 
     @Override

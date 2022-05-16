@@ -98,6 +98,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
     private final Time time;
     private final LogContext logContext;
     private final Logger log;
+    private final Map<String, Integer> saslServerMaxReceiveSizeByMechanism;
 
     public SaslChannelBuilder(Mode mode,
                               Map<String, JaasContext> jaasContexts,
@@ -134,6 +135,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         if (mode == Mode.SERVER && apiVersionSupplier == null) {
             throw new IllegalArgumentException("Server channel builder must provide an ApiVersionResponse supplier");
         }
+        this.saslServerMaxReceiveSizeByMechanism = new HashMap<>();
     }
 
     @SuppressWarnings("unchecked")
@@ -144,6 +146,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
             if (mode == Mode.SERVER) {
                 createServerCallbackHandlers(configs);
                 createConnectionsMaxReauthMsMap(configs);
+                createSaslMaxReceiveSize(configs);
             } else
                 createClientCallbackHandler(configs);
             for (Map.Entry<String, AuthenticateCallbackHandler> entry : saslCallbackHandlers.entrySet()) {
@@ -222,6 +225,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
                         transportLayer,
                         Collections.unmodifiableMap(subjects),
                         Collections.unmodifiableMap(connectionsMaxReauthMsByMechanism),
+                        Collections.unmodifiableMap(saslServerMaxReceiveSizeByMechanism),
                         metadataRegistry);
             } else {
                 LoginManager loginManager = loginManagers.get(clientSaslMechanism);
@@ -270,10 +274,11 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
                                                                TransportLayer transportLayer,
                                                                Map<String, Subject> subjects,
                                                                Map<String, Long> connectionsMaxReauthMsByMechanism,
+                                                               Map<String, Integer> saslServerMaxReceiveSizeByMechanism,
                                                                ChannelMetadataRegistry metadataRegistry) {
         return new SaslServerAuthenticator(configs, callbackHandlers, id, subjects,
                 kerberosShortNamer, listenerName, securityProtocol, transportLayer,
-                connectionsMaxReauthMsByMechanism, metadataRegistry, time, apiVersionSupplier);
+                connectionsMaxReauthMsByMechanism, saslServerMaxReceiveSizeByMechanism, metadataRegistry, time, apiVersionSupplier);
     }
 
     // Visible to override for testing
@@ -335,6 +340,18 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
                 connectionsMaxReauthMs = (Long) configs.get(BrokerSecurityConfigs.CONNECTIONS_MAX_REAUTH_MS);
             if (connectionsMaxReauthMs != null)
                 connectionsMaxReauthMsByMechanism.put(mechanism, connectionsMaxReauthMs);
+        }
+    }
+
+    private void createSaslMaxReceiveSize(Map<String, ?> configs) {
+        for (String mechanism : jaasContexts.keySet()) {
+            String prefix = ListenerName.saslMechanismPrefix(mechanism);
+            Integer saslMaxReceiveSize = (Integer) configs.get(prefix + BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG);
+            if (saslMaxReceiveSize == null)
+                saslMaxReceiveSize = (Integer) configs.get(BrokerSecurityConfigs.SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE_CONFIG);
+            if (saslMaxReceiveSize == null)
+                saslMaxReceiveSize = BrokerSecurityConfigs.DEFAULT_SASL_SERVER_AUTHN_MAX_RECEIVE_SIZE;
+            saslServerMaxReceiveSizeByMechanism.put(mechanism, saslMaxReceiveSize);
         }
     }
 
