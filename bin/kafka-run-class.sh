@@ -339,6 +339,9 @@ CLASSPATH=${CLASSPATH#:}
 # If Cygwin is detected, classpath is converted to Windows format.
 (( WINDOWS_OS_FORMAT )) && CLASSPATH=$(cygpath --path --mixed "${CLASSPATH}")
 
+echo "MANI:"
+echo "$KAFKA_LOG4J_CMD_OPTS"
+echo "$CLASSPATH"
 # If KAFKA_MODE=native, it will bring up Kafka in the native mode.
 # It expects the Kafka executable binary to be present at $base_dir/kafka.Kafka.
 # This is specifically used to run system tests on native Kafka - by bringing up Kafka in the native mode.
