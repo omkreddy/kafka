@@ -17,6 +17,7 @@
 package org.apache.kafka.common.network;
 
 import org.apache.kafka.common.KafkaException;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.SslConfigs;
 import org.apache.kafka.common.config.internals.BrokerSecurityConfigs;
 import org.apache.kafka.common.memory.MemoryPool;
@@ -45,6 +46,10 @@ public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable
     private SslFactory sslFactory;
     private Map<String, ?> configs;
     private SslPrincipalMapper sslPrincipalMapper;
+    // Visible for testing
+    volatile int maxUnsentPostHandshakeMessages;
+    // Visible for testing
+    volatile long heldPostHandshakeMessagesMaxReadBytes;
 
     /**
      * Constructs an SSL channel builder. ListenerName is provided only
@@ -66,6 +71,8 @@ public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable
                 sslPrincipalMapper = SslPrincipalMapper.fromRules(sslPrincipalMappingRules);
             this.sslFactory = new SslFactory(connectionMode, null, isInterBrokerListener);
             this.sslFactory.configure(this.configs);
+            this.maxUnsentPostHandshakeMessages = maxUnsentPostHandshakeMessages(connectionMode, configs);
+            this.heldPostHandshakeMessagesMaxReadBytes = heldPostHandshakeMessagesMaxReadBytes(connectionMode, configs);
         } catch (KafkaException e) {
             throw e;
         } catch (Exception e) {
@@ -86,6 +93,8 @@ public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable
     @Override
     public void reconfigure(Map<String, ?> configs) {
         sslFactory.reconfigure(configs);
+        this.maxUnsentPostHandshakeMessages = maxUnsentPostHandshakeMessages(connectionMode, configs);
+        this.heldPostHandshakeMessagesMaxReadBytes = heldPostHandshakeMessagesMaxReadBytes(connectionMode, configs);
     }
 
     @Override
@@ -120,7 +129,32 @@ public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable
     protected SslTransportLayer buildTransportLayer(SslFactory sslFactory, String id, SelectionKey key, ChannelMetadataRegistry metadataRegistry) throws IOException {
         SocketChannel socketChannel = (SocketChannel) key.channel();
         return SslTransportLayer.create(id, key, sslFactory.createSslEngine(socketChannel.socket()),
-            metadataRegistry);
+            metadataRegistry, maxUnsentPostHandshakeMessages, heldPostHandshakeMessagesMaxReadBytes);
+    }
+
+    static int maxUnsentPostHandshakeMessages(ConnectionMode connectionMode, Map<String, ?> configs) {
+        // Clients don't define the config, so a value set there is unparsed.
+        String config = BrokerSecurityConfigs.SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_CONFIG;
+        Object value = configs.get(config);
+        if (connectionMode == ConnectionMode.CLIENT || value == null)
+            return BrokerSecurityConfigs.DEFAULT_SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES;
+        int max = (Integer) value;
+        int limit = BrokerSecurityConfigs.MAX_SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES;
+        if (max < 1 || max > limit)
+            throw new ConfigException(config, max, "Value must be between 1 and " + limit);
+        return max;
+    }
+
+    static long heldPostHandshakeMessagesMaxReadBytes(ConnectionMode connectionMode, Map<String, ?> configs) {
+        // Clients don't define the config, so a value set there is unparsed.
+        String config = BrokerSecurityConfigs.SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_CONFIG;
+        Object value = configs.get(config);
+        if (connectionMode == ConnectionMode.CLIENT || value == null)
+            return BrokerSecurityConfigs.DEFAULT_SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES;
+        long max = (Long) value;
+        if (max < 0)
+            throw new ConfigException(config, max, "Value must be at least 0");
+        return max;
     }
 
     /**

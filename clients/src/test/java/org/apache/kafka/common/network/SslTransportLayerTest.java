@@ -42,6 +42,9 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.ArgumentsProvider;
 import org.junit.jupiter.params.provider.ArgumentsSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.AdditionalAnswers;
+import org.mockito.stubbing.Answer;
 
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
@@ -71,7 +74,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 import java.util.stream.Stream;
 
 import javax.net.ssl.SSLContext;
@@ -109,6 +114,10 @@ import static org.mockito.Mockito.when;
 public class SslTransportLayerTest {
 
     private static final int BUFFER_SIZE = 4 * 1024;
+    private static final int MAX_UNSENT_POST_HANDSHAKE_MESSAGES = 16;
+    // The data in each record wrapMessage writes
+    private static final int MESSAGE_BYTES = 14;
+    private static final long HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES = 10 * MESSAGE_BYTES;
     // The size of SslTransportLayer's file channel buffer
     private static final int TRANSFER_SIZE = 32 * 1024;
     private static final Time TIME = Time.SYSTEM;
@@ -1628,7 +1637,7 @@ public class SslTransportLayerTest {
         return out;
     }
 
-    private static void peerWrite(SocketChannel channel, ByteBuffer buffer) throws Exception {
+    static void peerWrite(SocketChannel channel, ByteBuffer buffer) throws Exception {
         while (buffer.hasRemaining())
             channel.write(buffer);
     }
@@ -1791,7 +1800,8 @@ public class SslTransportLayerTest {
             private final AtomicInteger numDelayedFlushesRemaining;
 
             public TestSslTransportLayer(String channelId, SelectionKey key, SSLEngine sslEngine) {
-                super(channelId, key, sslEngine, new DefaultChannelMetadataRegistry());
+                super(channelId, key, sslEngine, new DefaultChannelMetadataRegistry(), maxUnsentPostHandshakeMessages,
+                    heldPostHandshakeMessagesMaxReadBytes);
                 this.netReadBufSize = new ResizeableBufferSize(netReadBufSizeOverride);
                 this.netWriteBufSize = new ResizeableBufferSize(netWriteBufSizeOverride);
                 this.appBufSize = new ResizeableBufferSize(appBufSizeOverride);
@@ -2056,5 +2066,583 @@ public class SslTransportLayerTest {
         // Not after a local close or a handshake failure, which also close the engine's inbound side.
         doReturn(false).when(sslTransportLayer).ready();
         assertFalse(sslTransportLayer.hasBytesBuffered());
+    }
+
+    /**
+     * Tests that a server sends the response to a TLSv1.3 KeyUpdate requesting an update while it has no data of its
+     * own to send, rather than leaving it queued in the SSL engine, and that the client can read the data the server
+     * sends with its updated keys afterwards.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"TLSv1.2", "TLSv1.3"})
+    public void testServerRespondsToKeyUpdateWithoutDataToSend(String tlsProtocol) throws Exception {
+        AtomicReference<SSLEngineResult.HandshakeStatus> serverHandshakeStatus = new AtomicReference<>();
+        assertCloseCause(tlsProtocol, null, sendKeyUpdates(tlsProtocol, false, false, serverHandshakeStatus, 1));
+        if (tlsProtocol.equals("TLSv1.3"))
+            assertEquals(SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING, serverHandshakeStatus.get());
+    }
+
+    /**
+     * Tests that a server closes the connection when a peer keeps sending TLSv1.3 KeyUpdates requesting an update
+     * while not reading the responses.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"TLSv1.2", "TLSv1.3"})
+    public void testServerClosesConnectionOnUnsentKeyUpdateResponses(String tlsProtocol) throws Exception {
+        int max = MAX_UNSENT_POST_HANDSHAKE_MESSAGES;
+        assertCloseCause(tlsProtocol, null, sendKeyUpdates(tlsProtocol, true, false, new AtomicReference<>(), max));
+        assertCloseCause(tlsProtocol, SslTransportLayer.UNSENT_POST_HANDSHAKE_MESSAGES_MESSAGE,
+            sendKeyUpdates(tlsProtocol, true, false, new AtomicReference<>(), max + 1));
+    }
+
+    /**
+     * Tests that a server closes the connection when a peer not reading the responses sends more TLSv1.3 KeyUpdates
+     * requesting an update in a single record than it may leave unsent, since the SSL engine queues a response for
+     * each.
+     */
+    @Test
+    public void testServerClosesConnectionOnUnsentKeyUpdateResponsesInOneRecord() throws Exception {
+        int max = MAX_UNSENT_POST_HANDSHAKE_MESSAGES;
+        assertCloseCause("TLSv1.3", SslTransportLayer.UNSENT_POST_HANDSHAKE_MESSAGES_MESSAGE,
+            sendKeyUpdates("TLSv1.3", true, true, new AtomicReference<>(), max + 1));
+    }
+
+    /**
+     * Tests that a server sends the responses to TLSv1.3 KeyUpdates requesting an update right away, so a peer reading
+     * them, such as a JDK client whose key limit is lower than the server's, may send more before the server next
+     * writes than the server may leave unsent, whether in separate records or in one.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testServerSendsKeyUpdateResponsesRightAway(boolean oneRecord) throws Exception {
+        int max = MAX_UNSENT_POST_HANDSHAKE_MESSAGES;
+        assertNull(sendKeyUpdates("TLSv1.3", false, oneRecord, new AtomicReference<>(), 4 * max));
+    }
+
+    /**
+     * Tests that responses sent along with the server's own data are no longer counted as unsent.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"TLSv1.2", "TLSv1.3"})
+    public void testServerResetsUnsentKeyUpdateResponsesOnWrite(String tlsProtocol) throws Exception {
+        int max = MAX_UNSENT_POST_HANDSHAKE_MESSAGES;
+        assertCloseCause(tlsProtocol, null, sendKeyUpdates(tlsProtocol, true, false, new AtomicReference<>(), max, max));
+    }
+
+    /**
+     * Tests that a server grows netWriteBuffer to hold the responses to TLSv1.3 KeyUpdates requesting an update while
+     * the peer is not reading them, and shrinks it back once it sends them, with its next data or on read.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    public void testServerShrinksNetWriteBufferOnceSent(boolean onRead) throws Exception {
+        Args args = new Args("TLSv1.3", false);
+        try (RawTlsConnection connection = new RawTlsConnection(builder -> builder.configure(args.sslServerConfigs),
+                args.sslClientConfigs, UnaryOperator.identity())) {
+            SslTransportLayer transportLayer = connection.serverTransportLayer.get();
+            int packetBufferSize = connection.serverEngine.get().getSession().getPacketBufferSize();
+            // The engine needs room for a whole packet to wrap each response, so the second one grows the buffer.
+            connection.blockServerWrites.set(true);
+            writeKeyUpdates(connection, 2);
+            assertNull(connection.pollServer(1));
+            assertTrue(transportLayer.netWriteBuffer().capacity() > packetBufferSize);
+
+            connection.blockServerWrites.set(false);
+            if (onRead) {
+                writeKeyUpdates(connection, 1);
+                assertNull(connection.pollServer(1));
+            } else {
+                connection.sendFromServer();
+            }
+            assertEquals(packetBufferSize, transportLayer.netWriteBuffer().capacity());
+        }
+    }
+
+    /**
+     * Tests that a server wraps the TLSv1.3 KeyUpdates its SSL engine starts while reading records with data, as the
+     * JDK does past {@code jdk.tls.keyLimits}, while it has no data of its own to send, such as for a producer using
+     * acks=0, and sends them once half the limit on unsent messages are unsent, but not before, since OpenSSL peers,
+     * such as librdkafka, fail on a KeyUpdate requesting an update that arrives while one of their writes is pending.
+     */
+    @Test
+    public void testServerSendsKeyUpdatesStartedOnReadWithoutDataToSend() throws Exception {
+        int maxDeferred = MAX_UNSENT_POST_HANDSHAKE_MESSAGES / 2;
+        AtomicReference<SSLEngineResult.HandshakeStatus> serverHandshakeStatus = new AtomicReference<>();
+        AtomicBoolean serverHasPendingWrites = new AtomicBoolean();
+        AtomicLong serverBytesWritten = new AtomicLong();
+        assertNull(sendRecordsStartingKeyUpdates(false, false, serverHandshakeStatus, serverHasPendingWrites,
+            serverBytesWritten, maxDeferred - 1));
+        assertEquals(SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING, serverHandshakeStatus.get());
+        assertTrue(serverHasPendingWrites.get());
+        assertEquals(0, serverBytesWritten.get());
+        assertNull(sendRecordsStartingKeyUpdates(false, false, serverHandshakeStatus, serverHasPendingWrites,
+            serverBytesWritten, maxDeferred));
+        assertFalse(serverHasPendingWrites.get());
+        assertTrue(serverBytesWritten.get() > 0);
+    }
+
+    /**
+     * Tests that a server sends a TLSv1.3 KeyUpdate its SSL engine starts once while reading a record with data, as the
+     * JDK does at {@code jdk.tls.keyLimits} once fixed, while it has no data of its own to send, once it reads
+     * {@code ssl.held.post.handshake.messages.max.read.bytes} of data after it, but not before.
+     */
+    @Test
+    public void testServerSendsKeyUpdateStartedOnceOnReadWithoutDataToSend() throws Exception {
+        int recordsAfter = (int) (HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES / MESSAGE_BYTES);
+        AtomicBoolean serverHasPendingWrites = new AtomicBoolean();
+        AtomicLong serverBytesWritten = new AtomicLong();
+        assertNull(sendRecordsStartingKeyUpdates(false, true, new AtomicReference<>(), serverHasPendingWrites,
+            serverBytesWritten, recordsAfter));
+        assertTrue(serverHasPendingWrites.get());
+        assertEquals(0, serverBytesWritten.get());
+        assertNull(sendRecordsStartingKeyUpdates(false, true, new AtomicReference<>(), serverHasPendingWrites,
+            serverBytesWritten, 1 + recordsAfter));
+        assertFalse(serverHasPendingWrites.get());
+        assertTrue(serverBytesWritten.get() > 0);
+    }
+
+    /**
+     * Tests that a server counts the data in records that start a TLSv1.3 KeyUpdate themselves, as the JDK does for
+     * every record past {@code jdk.tls.keyLimits} until the peer updates its key, so it sends held KeyUpdates once
+     * {@code ssl.held.post.handshake.messages.max.read.bytes} of data are read after them, but not before.
+     */
+    @Test
+    public void testServerSendsKeyUpdatesStartedOnEveryRecordAfterHeldMaxReadBytes() throws Exception {
+        int recordsAfter = 3;
+        long maxReadBytes = recordsAfter * MESSAGE_BYTES;
+        assertTrue(1 + recordsAfter < MAX_UNSENT_POST_HANDSHAKE_MESSAGES / 2);
+        AtomicBoolean serverHasPendingWrites = new AtomicBoolean();
+        AtomicLong serverBytesWritten = new AtomicLong();
+        assertNull(sendRecordsStartingKeyUpdates(false, false, maxReadBytes, new AtomicReference<>(),
+            serverHasPendingWrites, serverBytesWritten, recordsAfter));
+        assertTrue(serverHasPendingWrites.get());
+        assertEquals(0, serverBytesWritten.get());
+        assertNull(sendRecordsStartingKeyUpdates(false, false, maxReadBytes, new AtomicReference<>(),
+            serverHasPendingWrites, serverBytesWritten, 1 + recordsAfter));
+        assertTrue(serverBytesWritten.get() > 0);
+    }
+
+    /**
+     * Tests that a server sends a TLSv1.3 KeyUpdate its SSL engine starts while reading a record with data right away
+     * when {@code ssl.held.post.handshake.messages.max.read.bytes} is 0.
+     */
+    @Test
+    public void testServerSendsKeyUpdateStartedOnReadRightAwayWithZeroHeldMaxReadBytes() throws Exception {
+        AtomicBoolean serverHasPendingWrites = new AtomicBoolean();
+        AtomicLong serverBytesWritten = new AtomicLong();
+        assertNull(sendRecordsStartingKeyUpdates(false, true, 0, new AtomicReference<>(),
+            serverHasPendingWrites, serverBytesWritten, 1));
+        assertFalse(serverHasPendingWrites.get());
+        assertTrue(serverBytesWritten.get() > 0);
+    }
+
+    /**
+     * Tests that a server keeps the connection when a peer reading the KeyUpdates its SSL engine starts while reading
+     * sends more records than the limit on unsent messages before the server next writes, as a large produce request
+     * may.
+     */
+    @Test
+    public void testServerKeepsConnectionOnKeyUpdatesStartedOnReadWhileReading() throws Exception {
+        assertNull(sendRecordsStartingKeyUpdates(false, false, new AtomicReference<>(), new AtomicBoolean(), new AtomicLong(),
+            4 * MAX_UNSENT_POST_HANDSHAKE_MESSAGES));
+    }
+
+    /**
+     * Tests that a server closes the connection when a peer keeps sending records that make its SSL engine start a
+     * KeyUpdate while not reading them, but not before.
+     */
+    @Test
+    public void testServerClosesConnectionOnKeyUpdatesStartedOnReadWhileNotReading() throws Exception {
+        int max = MAX_UNSENT_POST_HANDSHAKE_MESSAGES;
+        assertNull(sendRecordsStartingKeyUpdates(true, false, new AtomicReference<>(), new AtomicBoolean(), new AtomicLong(),
+            max));
+        SSLException closeCause = assertInstanceOf(SSLException.class,
+            sendRecordsStartingKeyUpdates(true, false, new AtomicReference<>(), new AtomicBoolean(), new AtomicLong(),
+                max + 1));
+        assertEquals(SslTransportLayer.UNSENT_POST_HANDSHAKE_MESSAGES_MESSAGE, closeCause.getMessage());
+    }
+
+    /**
+     * Tests that a server closes the connection instead of looping when its SSL engine wraps a post-handshake message
+     * without producing anything while still needing to wrap.
+     */
+    @Test
+    public void testServerClosesConnectionOnPostHandshakeWrapWithoutProgress() throws Exception {
+        Args args = new Args("TLSv1.3", false);
+        AtomicBoolean stallWraps = new AtomicBoolean();
+        AtomicInteger stalledWraps = new AtomicInteger();
+        UnaryOperator<SSLEngine> serverEngineWrapper = sslEngine -> {
+            Answer<Object> delegate = AdditionalAnswers.delegatesTo(sslEngine);
+            return mock(SSLEngine.class, invocation -> {
+                if (!stallWraps.get() || !invocation.getMethod().getName().equals("wrap") ||
+                        invocation.getArguments().length != 2 || ((ByteBuffer) invocation.getArgument(0)).hasRemaining())
+                    return delegate.answer(invocation);
+                if (stalledWraps.incrementAndGet() > 100)
+                    throw new AssertionError("Server kept wrapping without progress");
+                return new SSLEngineResult(SSLEngineResult.Status.OK, SSLEngineResult.HandshakeStatus.NEED_WRAP, 0, 0);
+            });
+        };
+        try (RawTlsConnection connection = new RawTlsConnection(builder -> builder.configure(args.sslServerConfigs),
+                args.sslClientConfigs, serverEngineWrapper)) {
+            stallWraps.set(true);
+            writeKeyUpdates(connection, 1);
+            Exception closeCause = assertInstanceOf(IllegalStateException.class, connection.pollServer(1));
+            assertEquals("No progress wrapping TLS post-handshake message", closeCause.getMessage());
+        }
+    }
+
+    @ParameterizedTest
+    @ArgumentsSource(SslTransportLayerArgumentsProvider.class)
+    public void testReconfigureMaxUnsentPostHandshakeMessages(Args args) throws Exception {
+        try (SslChannelBuilder channelBuilder = new SslChannelBuilder(ConnectionMode.SERVER, null, false)) {
+            channelBuilder.configure(args.sslServerConfigs);
+            Map<String, Object> newConfigs = new HashMap<>(args.sslServerConfigs);
+            newConfigs.put(BrokerSecurityConfigs.SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_CONFIG, 4);
+            newConfigs.put(BrokerSecurityConfigs.SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_CONFIG, 5L);
+            channelBuilder.validateReconfiguration(newConfigs);
+            channelBuilder.reconfigure(newConfigs);
+            assertEquals(4, channelBuilder.maxUnsentPostHandshakeMessages);
+            assertEquals(5L, channelBuilder.heldPostHandshakeMessagesMaxReadBytes);
+        }
+    }
+
+    /**
+     * Asserts that the server closed the connection with an {@link SSLException} with {@code expectedMessage}, or did
+     * not close it if that is null. Before TLSv1.3, the server must instead have closed the connection on the first
+     * renegotiation request sent in place of a KeyUpdate.
+     */
+    private static void assertCloseCause(String tlsProtocol, String expectedMessage, Exception closeCause) {
+        if (!tlsProtocol.equals("TLSv1.3"))
+            expectedMessage = "Renegotiation is not supported";
+        if (expectedMessage == null) {
+            assertNull(closeCause);
+        } else {
+            assertInstanceOf(SSLException.class, closeCause);
+            assertEquals(expectedMessage, closeCause.getMessage());
+        }
+    }
+
+    /**
+     * Connects a client to a server over {@code tlsProtocol}, then bypasses the client's transport layer to send each
+     * batch of KeyUpdates requesting an update, or renegotiation requests before TLSv1.3, followed by a message, and
+     * polls the server until it receives the message. If {@code blockServerWrites} is set, the server cannot write to
+     * the socket. If {@code oneRecord} is set, the server's SSL engine unwraps each batch in one call, as it does when
+     * they share a record. Between batches, the server sends a message with writes unblocked, then blocks writes again
+     * and starts sending another one, which stays unsent. Sets {@code serverHandshakeStatus} to the server engine's
+     * status once it receives each message. Unless writes are blocked, the server finally sends a message, which the
+     * client must receive.
+     *
+     * @return the exception the server closed the connection with, or null if it did not close it
+     */
+    private Exception sendKeyUpdates(String tlsProtocol, boolean blockServerWrites, boolean oneRecord,
+                                     AtomicReference<SSLEngineResult.HandshakeStatus> serverHandshakeStatus,
+                                     int... keyUpdateBatches) throws Exception {
+        Args args = new Args(tlsProtocol, false);
+        args.sslServerConfigs.put(BrokerSecurityConfigs.SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_CONFIG, MAX_UNSENT_POST_HANDSHAKE_MESSAGES);
+        AtomicInteger keyUpdatesToUnwrap = new AtomicInteger();
+        UnaryOperator<SSLEngine> serverEngineWrapper = sslEngine -> {
+            if (!oneRecord)
+                return sslEngine;
+            return wrapUnwrap(sslEngine, (src, dst) -> {
+                SSLEngineResult result = sslEngine.unwrap(src, dst);
+                while (result.getStatus() == SSLEngineResult.Status.OK && result.bytesProduced() == 0 &&
+                        result.getHandshakeStatus() == SSLEngineResult.HandshakeStatus.NEED_WRAP &&
+                        keyUpdatesToUnwrap.decrementAndGet() > 0)
+                    result = sslEngine.unwrap(src, dst);
+                return result;
+            });
+        };
+        try (RawTlsConnection connection = new RawTlsConnection(builder -> builder.configure(args.sslServerConfigs),
+                args.sslClientConfigs, serverEngineWrapper)) {
+            assertEquals(tlsProtocol, connection.serverEngine.get().getSession().getProtocol());
+            connection.blockServerWrites.set(blockServerWrites);
+
+            // The client selector is not polled again until the server's final message.
+            Selector serverSelector = connection.serverSelector;
+            for (int batch = 0; batch < keyUpdateBatches.length; batch++) {
+                if (batch > 0) {
+                    connection.blockServerWrites.set(false);
+                    connection.sendFromServer();
+                    connection.blockServerWrites.set(blockServerWrites);
+                    connection.startServerSend();
+                    serverSelector.poll(10);
+                }
+
+                keyUpdatesToUnwrap.set(keyUpdateBatches[batch]);
+                writeKeyUpdates(connection, keyUpdateBatches[batch]);
+
+                Exception closeCause = connection.pollServer(1);
+                if (closeCause != null)
+                    return closeCause;
+                serverHandshakeStatus.set(connection.serverEngine.get().getHandshakeStatus());
+            }
+
+            if (!blockServerWrites) {
+                connection.startServerSend();
+                TestUtils.waitForCondition(() -> {
+                    serverSelector.poll(10);
+                    connection.selector.poll(10);
+                    return !connection.selector.completedReceives().isEmpty();
+                }, "Client did not receive the message");
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Bypasses the client's transport layer to send {@code keyUpdates} KeyUpdates requesting an update, each in its
+     * own record, or renegotiation requests before TLSv1.3, followed by a message.
+     */
+    private static void writeKeyUpdates(RawTlsConnection connection, int keyUpdates) throws Exception {
+        SSLEngine engine = connection.clientEngine;
+        ByteBuffer out = ByteBuffer.allocate((keyUpdates + 1) * engine.getSession().getPacketBufferSize());
+        for (int i = 0; i < keyUpdates; i++) {
+            // Starting a handshake once TLSv1.3 is negotiated makes the engine send a KeyUpdate requesting an update,
+            // and before TLSv1.3 a renegotiation request.
+            engine.beginHandshake();
+            engine.wrap(ByteBuffer.allocate(0), out);
+        }
+        wrapMessage(engine, 10, out);
+        out.flip();
+        peerWrite(connection.clientChannel, out);
+    }
+
+    /**
+     * Connects a client to a server over TLSv1.3 whose SSL engine starts a KeyUpdate requesting an update for each
+     * record with data it unwraps, as the JDK does past {@code jdk.tls.keyLimits} until the peer updates its key, or
+     * only for the first if {@code startOnce} is set. Then bypasses the client's transport layer, which is not polled
+     * again, to send {@code records} messages, each in its own record, and polls the server until it receives them. If
+     * {@code blockServerWrites} is set, the server cannot write to the socket. Sets {@code serverHandshakeStatus} to the
+     * server engine's status, {@code serverBytesWritten} to the bytes the server wrote to the socket while receiving
+     * them and {@code serverHasPendingWrites} to whether the server has output unsent once it receives them, if it did
+     * not close the connection.
+     *
+     * @return the exception the server closed the connection with, or null if it did not close it
+     */
+    private static Exception sendRecordsStartingKeyUpdates(boolean blockServerWrites, boolean startOnce,
+                                                           AtomicReference<SSLEngineResult.HandshakeStatus> serverHandshakeStatus,
+                                                           AtomicBoolean serverHasPendingWrites,
+                                                           AtomicLong serverBytesWritten,
+                                                           int records) throws Exception {
+        return sendRecordsStartingKeyUpdates(blockServerWrites, startOnce, HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES,
+            serverHandshakeStatus, serverHasPendingWrites, serverBytesWritten, records);
+    }
+
+    private static Exception sendRecordsStartingKeyUpdates(boolean blockServerWrites, boolean startOnce,
+                                                           long heldPostHandshakeMessagesMaxReadBytes,
+                                                           AtomicReference<SSLEngineResult.HandshakeStatus> serverHandshakeStatus,
+                                                           AtomicBoolean serverHasPendingWrites,
+                                                           AtomicLong serverBytesWritten,
+                                                           int records) throws Exception {
+        Args args = new Args("TLSv1.3", false);
+        args.sslServerConfigs.put(BrokerSecurityConfigs.SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_CONFIG, MAX_UNSENT_POST_HANDSHAKE_MESSAGES);
+        args.sslServerConfigs.put(BrokerSecurityConfigs.SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_CONFIG,
+            heldPostHandshakeMessagesMaxReadBytes);
+        AtomicBoolean startKeyUpdates = new AtomicBoolean();
+        UnaryOperator<SSLEngine> serverEngineWrapper = sslEngine -> wrapUnwrap(sslEngine, (src, dst) -> {
+            SSLEngineResult result = sslEngine.unwrap(src, dst);
+            if (!startKeyUpdates.get() || result.getStatus() != SSLEngineResult.Status.OK || result.bytesProduced() == 0 ||
+                    result.getHandshakeStatus() != SSLEngineResult.HandshakeStatus.NOT_HANDSHAKING)
+                return result;
+            sslEngine.beginHandshake();
+            if (startOnce)
+                startKeyUpdates.set(false);
+            return new SSLEngineResult(result.getStatus(), sslEngine.getHandshakeStatus(), result.bytesConsumed(),
+                result.bytesProduced());
+        });
+        try (RawTlsConnection connection = new RawTlsConnection(builder -> builder.configure(args.sslServerConfigs),
+                args.sslClientConfigs, serverEngineWrapper)) {
+            SSLEngine serverEngine = connection.serverEngine.get();
+            assertEquals("TLSv1.3", serverEngine.getSession().getProtocol());
+            connection.blockServerWrites.set(blockServerWrites);
+            startKeyUpdates.set(true);
+
+            SSLEngine engine = connection.clientEngine;
+            ByteBuffer out = ByteBuffer.allocate(records * engine.getSession().getPacketBufferSize());
+            for (int i = 0; i < records; i++)
+                wrapMessage(engine, MESSAGE_BYTES - 4, out);
+            out.flip();
+            long serverBytesWrittenBefore = connection.serverBytesWritten.get();
+            peerWrite(connection.clientChannel, out);
+            Exception closeCause = connection.pollServer(records);
+            serverHandshakeStatus.set(serverEngine.getHandshakeStatus());
+            serverBytesWritten.set(connection.serverBytesWritten.get() - serverBytesWrittenBefore);
+            if (closeCause == null)
+                serverHasPendingWrites.set(connection.serverTransportLayer.get().hasPendingWrites());
+            return closeCause;
+        }
+    }
+
+    private static void wrapMessage(SSLEngine engine, int size, ByteBuffer out) throws IOException {
+        ByteBuffer message = ByteBuffer.allocate(4 + size).putInt(size).put(new byte[size]);
+        message.flip();
+        assertEquals(SSLEngineResult.Status.OK, engine.wrap(message, out).getStatus());
+        assertFalse(message.hasRemaining());
+    }
+
+    private interface Unwrap {
+        SSLEngineResult unwrap(ByteBuffer src, ByteBuffer dst) throws SSLException;
+    }
+
+    /**
+     * Returns an SSL engine delegating to {@code sslEngine}, except that it unwraps one buffer into another with
+     * {@code unwrap}.
+     */
+    private static SSLEngine wrapUnwrap(SSLEngine sslEngine, Unwrap unwrap) {
+        Answer<Object> delegate = AdditionalAnswers.delegatesTo(sslEngine);
+        return mock(SSLEngine.class, invocation -> {
+            if (!invocation.getMethod().getName().equals("unwrap") || invocation.getArguments().length != 2)
+                return delegate.answer(invocation);
+            return unwrap.unwrap(invocation.getArgument(0), invocation.getArgument(1));
+        });
+    }
+
+    /**
+     * A client connected to a server over TLS, whose SSL engine and socket a test uses to write to the server directly,
+     * bypassing the client's transport layer. The server cannot write to the socket while {@link #blockServerWrites}
+     * is set, and {@link #serverBytesWritten} counts the bytes it writes to it.
+     */
+    static class RawTlsConnection implements AutoCloseable {
+        static final String SERVER_ID = "server";
+
+        final AtomicBoolean blockServerWrites = new AtomicBoolean(false);
+        final AtomicLong serverBytesWritten = new AtomicLong();
+        final AtomicReference<SSLEngine> serverEngine = new AtomicReference<>();
+        final AtomicReference<SslTransportLayer> serverTransportLayer = new AtomicReference<>();
+        final ServerSocketChannel serverSocket;
+        final Selector selector;
+        final Selector serverSelector;
+        final SSLEngine clientEngine;
+        final SocketChannel clientChannel;
+        private final AtomicReference<Exception> serverCloseCause = new AtomicReference<>();
+
+        /**
+         * @param configureServer configures the server's channel builder
+         * @param serverEngineWrapper wraps the server's SSL engine, which {@link #serverEngine} is set to unwrapped
+         */
+        RawTlsConnection(Consumer<TestSslChannelBuilder> configureServer, Map<String, Object> clientConfigs,
+                         UnaryOperator<SSLEngine> serverEngineWrapper) throws Exception {
+            TestSslChannelBuilder serverChannelBuilder = new TestSslChannelBuilder(ConnectionMode.SERVER) {
+                @Override
+                protected TestSslTransportLayer newTransportLayer(String id, SelectionKey key, SSLEngine sslEngine) {
+                    serverEngine.set(sslEngine);
+                    TestSslTransportLayer transportLayer = new TestSslTransportLayer(id, key,
+                            serverEngineWrapper.apply(sslEngine)) {
+                        @Override
+                        protected boolean flush(ByteBuffer buf) throws IOException {
+                            if (blockServerWrites.get() && buf.hasRemaining())
+                                return false;
+                            int remaining = buf.remaining();
+                            try {
+                                return super.flush(buf);
+                            } finally {
+                                serverBytesWritten.addAndGet(remaining - buf.remaining());
+                            }
+                        }
+
+                        @Override
+                        public int read(ByteBuffer dst) throws IOException {
+                            try {
+                                return super.read(dst);
+                            } catch (IOException | RuntimeException e) {
+                                serverCloseCause.set(e);
+                                throw e;
+                            }
+                        }
+                    };
+                    serverTransportLayer.set(transportLayer);
+                    return transportLayer;
+                }
+            };
+            configureServer.accept(serverChannelBuilder);
+            AtomicReference<SSLEngine> clientEngine = new AtomicReference<>();
+            AtomicReference<SocketChannel> clientChannel = new AtomicReference<>();
+            TestSslChannelBuilder clientChannelBuilder = new TestSslChannelBuilder(ConnectionMode.CLIENT) {
+                @Override
+                protected TestSslTransportLayer newTransportLayer(String id, SelectionKey key, SSLEngine sslEngine) throws IOException {
+                    clientEngine.set(sslEngine);
+                    clientChannel.set((SocketChannel) key.channel());
+                    return super.newTransportLayer(id, key, sslEngine);
+                }
+            };
+            clientChannelBuilder.configure(clientConfigs);
+
+            serverSocket = ServerSocketChannel.open();
+            selector = new Selector(5000, new Metrics(), TIME, "MetricGroup", clientChannelBuilder, new LogContext());
+            serverSelector = new Selector(5000, new Metrics(), TIME, "ServerMetricGroup", serverChannelBuilder,
+                new LogContext());
+            try {
+                serverSocket.bind(new InetSocketAddress("localhost", 0));
+                String node = "0";
+                selector.connect(node, new InetSocketAddress("localhost", serverSocket.socket().getLocalPort()),
+                    BUFFER_SIZE, BUFFER_SIZE);
+                SocketChannel serverChannel = serverSocket.accept();
+                serverChannel.configureBlocking(false);
+                serverSelector.register(SERVER_ID, serverChannel);
+                TestUtils.waitForCondition(() -> {
+                    selector.poll(10);
+                    serverSelector.poll(10);
+                    return selector.isChannelReady(node) && serverSelector.isChannelReady(SERVER_ID);
+                }, "TLS handshake did not complete");
+            } catch (Throwable e) {
+                try {
+                    close();
+                } catch (Exception closeException) {
+                    e.addSuppressed(closeException);
+                }
+                throw e;
+            }
+            this.clientEngine = clientEngine.get();
+            this.clientChannel = clientChannel.get();
+        }
+
+        /**
+         * Polls the server until it receives {@code messages} messages, and a while longer to see whether it
+         * disconnects.
+         *
+         * @return the exception the server closed the connection with, or null if it did not close it
+         */
+        Exception pollServer(int messages) throws IOException {
+            int received = 0;
+            int pollsAfterReceive = 10;
+            long end = System.currentTimeMillis() + 10_000;
+            while (pollsAfterReceive > 0 && System.currentTimeMillis() < end) {
+                serverSelector.poll(10);
+                received += serverSelector.completedReceives().size();
+                if (serverSelector.disconnected().containsKey(SERVER_ID)) {
+                    assertNotNull(serverCloseCause.get(), "Server disconnected without an exception");
+                    return serverCloseCause.get();
+                }
+                if (received >= messages)
+                    pollsAfterReceive--;
+            }
+            assertEquals(messages, received, "Server did not receive the messages");
+            return null;
+        }
+
+        /**
+         * Starts sending a message from the server.
+         */
+        void startServerSend() {
+            serverSelector.send(new NetworkSend(SERVER_ID, ByteBufferSend.sizePrefixed(ByteBuffer.allocate(10))));
+        }
+
+        /**
+         * Sends a message from the server, polling it until the message is sent.
+         */
+        void sendFromServer() throws InterruptedException {
+            startServerSend();
+            TestUtils.waitForCondition(() -> {
+                serverSelector.poll(10);
+                return !serverSelector.completedSends().isEmpty();
+            }, "Server did not send the message");
+        }
+
+        @Override
+        public void close() throws IOException {
+            selector.close();
+            serverSelector.close();
+            serverSocket.close();
+        }
     }
 }

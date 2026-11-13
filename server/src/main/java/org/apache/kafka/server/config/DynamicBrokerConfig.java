@@ -61,7 +61,9 @@ public class DynamicBrokerConfig {
     private static final Set<String> CLUSTER_LEVEL_LISTENER_CONFIGS = Set.of(
             SocketServerConfigs.MAX_CONNECTIONS_CONFIG,
             SocketServerConfigs.MAX_CONNECTION_CREATION_RATE_CONFIG,
-            SocketServerConfigs.NUM_NETWORK_THREADS_CONFIG);
+            SocketServerConfigs.NUM_NETWORK_THREADS_CONFIG,
+            BrokerSecurityConfigs.SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_CONFIG,
+            BrokerSecurityConfigs.SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_CONFIG);
 
     private static final Set<String> PER_BROKER_CONFIGS = Stream.of(
             DYNAMIC_SECURITY_CONFIGS,
@@ -144,7 +146,10 @@ public class DynamicBrokerConfig {
     }
 
     public static Set<String> securityConfigsWithoutListenerPrefix(Properties props) {
-        return DYNAMIC_SECURITY_CONFIGS.stream().filter(props::containsKey).collect(Collectors.toSet());
+        return DYNAMIC_SECURITY_CONFIGS.stream()
+                .filter(props::containsKey)
+                .filter(c -> !SslConfigs.BROKER_WIDE_RECONFIGURABLE_CONFIGS.contains(c))
+                .collect(Collectors.toSet());
     }
 
     public static void validateConfigTypes(Properties props) {

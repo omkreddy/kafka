@@ -144,6 +144,21 @@ public class BrokerSecurityConfigs {
     public static final String ALLOWED_SASL_OAUTHBEARER_FILES_CONFIG = "org.apache.kafka.sasl.oauthbearer.allowed.files";
     public static final String ALLOWED_SASL_OAUTHBEARER_FILES_DEFAULT = "";
 
+    public static final String SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_CONFIG = "ssl.max.unsent.post.handshake.messages";
+    public static final String SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_DOC = "Maximum number of unsent TLS post-handshake messages, such as KeyUpdates. "
+        + "Those caused by records with data wait for the next write until half this many are unsent, and the rest are sent right away. "
+        + "The connection closes above this. Clients always use the default. Applies to new connections.";
+    public static final int DEFAULT_SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES = 2048;
+    public static final int MAX_SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES = 16384;
+
+    public static final String SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_CONFIG = "ssl.held.post.handshake.messages.max.read.bytes";
+    public static final String SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_DOC = "Maximum bytes of data read while TLS post-handshake messages, "
+        + "such as KeyUpdates, wait for the next write. They are sent once this many are read. "
+        + "0 sends them right away, and Long.MAX_VALUE turns this limit off, so a peer that is never written to "
+        + "may not receive them. "
+        + "Clients always use the default. Applies to new connections.";
+    public static final long DEFAULT_SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES = 10L * 1024 * 1024 * 1024;
+
     public static final ConfigDef CONFIG_DEF =  new ConfigDef()
             // General Security Configuration
             .define(BrokerSecurityConfigs.CONNECTIONS_MAX_REAUTH_MS_CONFIG, LONG, BrokerSecurityConfigs.DEFAULT_CONNECTIONS_MAX_REAUTH_MS, MEDIUM, BrokerSecurityConfigs.CONNECTIONS_MAX_REAUTH_MS_DOC)
@@ -175,6 +190,8 @@ public class BrokerSecurityConfigs {
             .define(SslConfigs.SSL_SECURE_RANDOM_IMPLEMENTATION_CONFIG, STRING, null, LOW, SslConfigs.SSL_SECURE_RANDOM_IMPLEMENTATION_DOC)
             .define(SslConfigs.SSL_CIPHER_SUITES_CONFIG, LIST, List.of(), ConfigDef.ValidList.anyNonDuplicateValues(true, false), MEDIUM, SslConfigs.SSL_CIPHER_SUITES_DOC)
             .define(SslConfigs.SSL_ENGINE_FACTORY_CLASS_CONFIG, CLASS, null, LOW, SslConfigs.SSL_ENGINE_FACTORY_CLASS_DOC)
+            .define(BrokerSecurityConfigs.SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_CONFIG, INT, BrokerSecurityConfigs.DEFAULT_SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES, ConfigDef.Range.between(1, BrokerSecurityConfigs.MAX_SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES), LOW, BrokerSecurityConfigs.SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES_DOC)
+            .define(BrokerSecurityConfigs.SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_CONFIG, LONG, BrokerSecurityConfigs.DEFAULT_SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES, ConfigDef.Range.atLeast(0), LOW, BrokerSecurityConfigs.SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES_DOC)
 
             // Sasl Configuration
             .define(BrokerSecurityConfigs.SASL_MECHANISM_INTER_BROKER_PROTOCOL_CONFIG, STRING, SaslConfigs.DEFAULT_SASL_MECHANISM, MEDIUM, BrokerSecurityConfigs.SASL_MECHANISM_INTER_BROKER_PROTOCOL_DOC)

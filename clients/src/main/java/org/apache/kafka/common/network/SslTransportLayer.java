@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.common.network;
 
+import org.apache.kafka.common.config.internals.BrokerSecurityConfigs;
 import org.apache.kafka.common.errors.SslAuthenticationException;
 import org.apache.kafka.common.security.auth.KafkaPrincipal;
 import org.apache.kafka.common.utils.Utils;
@@ -73,6 +74,7 @@ public class SslTransportLayer implements TransportLayer {
     }
 
     private static final String TLS13 = "TLSv1.3";
+    static final String UNSENT_POST_HANDSHAKE_MESSAGES_MESSAGE = "Too many unsent TLS post-handshake messages";
 
     private final String channelId;
     private final SSLEngine sslEngine;
@@ -90,16 +92,40 @@ public class SslTransportLayer implements TransportLayer {
     private ByteBuffer appReadBuffer;
     private ByteBuffer fileChannelBuffer;
     private boolean hasBytesBuffered;
+    private final int maxUnsentPostHandshakeMessages;
+    private final long heldPostHandshakeMessagesMaxReadBytes;
+    // Post-handshake messages wrapped since netWriteBuffer was last fully flushed.
+    private int unsentPostHandshakeMessages;
+    // Bytes of data read while post-handshake messages are unsent.
+    private long bytesReadWithUnsentPostHandshakeMessages;
+    private boolean netWriteBufferGrownForPostHandshakeMessages;
 
     public static SslTransportLayer create(String channelId, SelectionKey key, SSLEngine sslEngine,
                                            ChannelMetadataRegistry metadataRegistry) throws IOException {
         return new SslTransportLayer(channelId, key, sslEngine, metadataRegistry);
     }
 
+    public static SslTransportLayer create(String channelId, SelectionKey key, SSLEngine sslEngine,
+                                           ChannelMetadataRegistry metadataRegistry,
+                                           int maxUnsentPostHandshakeMessages,
+                                           long heldPostHandshakeMessagesMaxReadBytes) throws IOException {
+        return new SslTransportLayer(channelId, key, sslEngine, metadataRegistry, maxUnsentPostHandshakeMessages,
+            heldPostHandshakeMessagesMaxReadBytes);
+    }
+
     // Prefer `create`, only use this in tests
     SslTransportLayer(String channelId, SelectionKey key, SSLEngine sslEngine,
                       ChannelMetadataRegistry metadataRegistry) {
+        this(channelId, key, sslEngine, metadataRegistry, BrokerSecurityConfigs.DEFAULT_SSL_MAX_UNSENT_POST_HANDSHAKE_MESSAGES,
+            BrokerSecurityConfigs.DEFAULT_SSL_HELD_POST_HANDSHAKE_MESSAGES_MAX_READ_BYTES);
+    }
+
+    SslTransportLayer(String channelId, SelectionKey key, SSLEngine sslEngine,
+                      ChannelMetadataRegistry metadataRegistry, int maxUnsentPostHandshakeMessages,
+                      long heldPostHandshakeMessagesMaxReadBytes) {
         this.channelId = channelId;
+        this.maxUnsentPostHandshakeMessages = maxUnsentPostHandshakeMessages;
+        this.heldPostHandshakeMessagesMaxReadBytes = heldPostHandshakeMessagesMaxReadBytes;
         this.key = key;
         this.socketChannel = (SocketChannel) key.channel();
         this.sslEngine = sslEngine;
@@ -246,10 +272,16 @@ public class SslTransportLayer implements TransportLayer {
     */
     protected boolean flush(ByteBuffer buf) throws IOException {
         int remaining = buf.remaining();
+        int written = 0;
         if (remaining > 0) {
-            int written = socketChannel.write(buf);
-            return written >= remaining;
+            written = socketChannel.write(buf);
         }
+        if (written < remaining)
+            return false;
+        // Callers pass netWriteBuffer, so it is empty and every post-handshake message was sent.
+        unsentPostHandshakeMessages = 0;
+        bytesReadWithUnsentPostHandshakeMessages = 0;
+        maybeShrinkNetWriteBuffer();
         return true;
     }
 
@@ -615,6 +647,13 @@ public class SslTransportLayer implements TransportLayer {
 
                 if (unwrapResult.getStatus() == Status.OK) {
                     read += readFromAppBuffer(dst);
+                    boolean hasData = unwrapResult.bytesProduced() > 0;
+                    if (hasData && unsentPostHandshakeMessages > 0)
+                        bytesReadWithUnsentPostHandshakeMessages += unwrapResult.bytesProduced();
+                    if (unwrapResult.getHandshakeStatus() == HandshakeStatus.NEED_WRAP)
+                        writePostHandshakeMessages(hasData);
+                    else if (hasData && unsentPostHandshakeMessages > 0)
+                        maybeFlushPostHandshakeMessages(true);
                 } else if (unwrapResult.getStatus() == Status.BUFFER_OVERFLOW) {
                     int currentApplicationBufferSize = applicationBufferSize();
                     appReadBuffer = Utils.ensureCapacity(appReadBuffer, currentApplicationBufferSize);
@@ -657,6 +696,91 @@ public class SslTransportLayer implements TransportLayer {
         // If data has been read and unwrapped, return the data even if end-of-stream, channel will be closed
         // on a subsequent poll, see hasBytesBuffered().
         return read;
+    }
+
+    /**
+     * Wraps the TLSv1.3 post-handshake messages the engine produces while reading, such as KeyUpdate responses and the
+     * KeyUpdates the JDK starts past {@code jdk.tls.keyLimits}, into netWriteBuffer after any output still unsent, and
+     * flushes them when safe, once half the limit are unsent or once enough data is read after them. A record can carry
+     * many messages, and the engine would otherwise keep them all until the next write. Closes the connection if too
+     * many are unsent.
+     */
+    private void writePostHandshakeMessages(boolean hasData) throws IOException {
+        handshakeStatus = HandshakeStatus.NEED_WRAP;
+        while (handshakeStatus == HandshakeStatus.NEED_WRAP) {
+            maybeFlushPostHandshakeMessages(hasData);
+            makeRoomForPostHandshakeMessage();
+            SSLEngineResult result;
+            try {
+                result = sslEngine.wrap(ByteUtils.EMPTY_BUF, netWriteBuffer);
+            } finally {
+                netWriteBuffer.flip();
+            }
+            if (result.getStatus() == Status.CLOSED)
+                throw new EOFException();
+            if (result.getStatus() != Status.OK)
+                throw new IllegalStateException("Unexpected status " + result.getStatus() + " wrapping TLS post-handshake message");
+            if (++unsentPostHandshakeMessages > maxUnsentPostHandshakeMessages) {
+                log.info("Closing channel since {} TLS post-handshake messages are unsent", unsentPostHandshakeMessages);
+                throw new SSLException(UNSENT_POST_HANDSHAKE_MESSAGES_MESSAGE);
+            }
+            handshakeStatus = result.getHandshakeStatus();
+            if (handshakeStatus == HandshakeStatus.NEED_TASK)
+                handshakeStatus = runDelegatedTasks();
+            if (result.bytesProduced() == 0 && handshakeStatus == HandshakeStatus.NEED_WRAP)
+                throw new IllegalStateException("No progress wrapping TLS post-handshake message");
+        }
+        maybeFlushPostHandshakeMessages(hasData);
+    }
+
+    /**
+     * Sets netWriteBuffer, which holds the unsent bytes between its position and limit, to append a post-handshake
+     * message after them, with room for the engine to wrap a record.
+     */
+    private void makeRoomForPostHandshakeMessage() {
+        int unsentBytes = netWriteBuffer.remaining();
+
+        // Move the unsent bytes to the start. compact() would copy them even when they are already there.
+        if (netWriteBuffer.position() > 0) {
+            netWriteBuffer.compact();
+        } else {
+            netWriteBuffer.limit(netWriteBuffer.capacity());
+            netWriteBuffer.position(unsentBytes);
+        }
+
+        // The engine requires room for a whole record, though each message only adds a few bytes. Doubling keeps the
+        // copies few. On a server at the default limit it peaks at about 130KB, and shrinks back once sent.
+        int required = unsentBytes + netWriteBufferSize();
+        if (required > netWriteBuffer.capacity()) {
+            int newCapacity = Math.max(required, 2 * netWriteBuffer.capacity());
+            netWriteBuffer = Utils.ensureCapacity(netWriteBuffer, newCapacity);
+            netWriteBufferGrownForPostHandshakeMessages = true;
+        }
+    }
+
+    private void maybeFlushPostHandshakeMessages(boolean hasData) throws IOException {
+        // Replies to records without data, such as a peer's KeyUpdates, are safe to send while the peer writes.
+        boolean safeToSend = !hasData;
+        // Sending these can fail a peer partway through writing a record, but waiting for write() lets a peer that
+        // sends without reading, such as a producer using acks=0, reach the limit, or never receive them.
+        boolean tooManyUnsent = unsentPostHandshakeMessages >= maxUnsentPostHandshakeMessages / 2;
+        if (safeToSend || tooManyUnsent) {
+            flush(netWriteBuffer);
+        } else if (unsentPostHandshakeMessages > 0 &&
+                bytesReadWithUnsentPostHandshakeMessages >= heldPostHandshakeMessagesMaxReadBytes) {
+            int unsent = unsentPostHandshakeMessages;
+            long bytesRead = bytesReadWithUnsentPostHandshakeMessages;
+            if (flush(netWriteBuffer))
+                log.info("Sent {} held TLS post-handshake messages after reading {} bytes of data", unsent, bytesRead);
+        }
+    }
+
+    // A connection the server never writes to, such as from a producer using acks=0, would otherwise keep it grown.
+    private void maybeShrinkNetWriteBuffer() {
+        if (netWriteBufferGrownForPostHandshakeMessages) {
+            netWriteBuffer = ByteBuffer.allocate(netWriteBufferSize()).flip();
+            netWriteBufferGrownForPostHandshakeMessages = false;
+        }
     }
 
 
@@ -888,6 +1012,11 @@ public class SslTransportLayer implements TransportLayer {
 
     protected ByteBuffer netReadBuffer() {
         return netReadBuffer;
+    }
+
+    // Visibility for testing
+    ByteBuffer netWriteBuffer() {
+        return netWriteBuffer;
     }
 
     // Visibility for testing
